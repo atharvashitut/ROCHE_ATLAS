@@ -1,0 +1,1 @@
+"""ITSM Copilot API application."""
