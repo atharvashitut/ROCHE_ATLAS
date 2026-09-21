@@ -1,5 +1,6 @@
 import pytest
 
+from change_mgmt.risk_calendar import BlackoutWindow, ConfigurationItem
 from triage.servicenow_relational import ServiceNowTicket
 from triage.vision_search import VisionAnalysis
 
@@ -40,3 +41,24 @@ def servicenow_tickets() -> list[ServiceNowTicket]:
         ServiceNowTicket("child-1", "INC0010002", "Veeva Vault login timeout for EU user", "New", parent="parent-1"),
         ServiceNowTicket("other-1", "INC0010003", "Salesforce browser issue", "Closed"),
     ]
+
+
+@pytest.fixture
+def veeva_mock_outputs() -> list[dict]:
+    return [
+        {"document_id": "Veeva Doc #501", "page": 4, "text": "LOW change requires a service owner."},
+        {"document_id": "Veeva Doc #501", "page": 7, "text": "NORMAL change requires a change manager."},
+        {"document_id": "Veeva Doc #501", "page": 11, "text": "EMERGENCY change requires emergency authorization."},
+    ]
+
+
+@pytest.fixture
+def cmdb_cis() -> list[ConfigurationItem]:
+    return [ConfigurationItem("CI-VAULT", "critical", "platform-ops")]
+
+
+@pytest.fixture
+def blackout_window() -> BlackoutWindow:
+    from datetime import datetime, timezone
+
+    return BlackoutWindow("Quarter close", datetime(2026, 10, 1, 8, tzinfo=timezone.utc), datetime(2026, 10, 1, 12, tzinfo=timezone.utc), ("CI-VAULT",))
