@@ -8,21 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-
-def redact(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: "***REDACTED***" if _is_sensitive(key) else redact(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [redact(item) for item in value]
-    return value
-
-
-def _is_sensitive(key: str) -> bool:
-    lower_key = key.lower().replace("-", "_")
-    return any(marker in lower_key for marker in (
-        "password", "token", "secret", "api_key", "authorization", "cookie",
-        "patient", "phi", "mrn", "medical_record", "date_of_birth", "dob", "ssn", "email", "phone",
-    ))
+from core.redaction import redact_payload
 
 
 @dataclass(frozen=True)
@@ -52,7 +38,7 @@ class AuditLogger:
 
     async def record(self, action: str, actor: str, resource: str, details: dict[str, Any], occurred_at: datetime | None = None) -> tuple[ImmutableAuditEntry, str]:
         timestamp = (occurred_at or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat()
-        payload = {"action": action, "actor": actor, "resource": resource, "details": redact(details)}
+        payload = {"action": action, "actor": actor, "resource": resource, "details": redact_payload(details)}
         canonical = json.dumps({"recorded_at": timestamp, **payload}, sort_keys=True, separators=(",", ":"), default=str)
         entry = ImmutableAuditEntry(
             entry_id=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),

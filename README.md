@@ -2,7 +2,7 @@
 
 ## ITSM-Copilot
 
-Phase 1 establishes a FastAPI triage API, a React/Tailwind operator UI, and a local Qdrant vector database.
+ITSM-Copilot provides a FastAPI decisioning API, a React/Tailwind operations UI, and a local Qdrant vector database. Phases 1–4 include triage, change control, audit/playbooks, predictive intelligence, privacy hardening, and a mock-mode smoke suite.
 
 ## Start locally
 
@@ -12,7 +12,11 @@ Phase 1 establishes a FastAPI triage API, a React/Tailwind operator UI, and a lo
 
 ## Test
 
-Run `docker compose run --rm api pytest`.
+Run `docker compose run --rm -v "$PWD/backend:/app:ro" api pytest -p no:cacheprovider`.
+
+Generate deterministic fixtures and verify the complete API journey with `python scripts/seed_data.py` and `python scripts/smoke_test.py`.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the topology and live-adapter migration model, and [DEPLOYMENT.md](DEPLOYMENT.md) for Docker Compose, Kubernetes, and Ona deployment guidance.
 
 ## Triage engine
 

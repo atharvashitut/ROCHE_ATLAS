@@ -132,6 +132,25 @@ class VisionSearchService:
         )
 
 
+class MockTerraVisionClient:
+    """Deterministic local replacement for a GPT-Terra Vision deployment."""
+
+    async def analyse(self, image_base64: str) -> VisionAnalysis:
+        _validate_base64_image(image_base64)
+        return VisionAnalysis("Veeva Vault authentication timeout shown in screenshot", [0.12, 0.34])
+
+
+class MockQdrantVectorStore:
+    """Deterministic knowledge-base hit used by smoke tests and local mock mode."""
+
+    async def search(self, embedding: list[float], limit: int = 1) -> list[dict[str, Any]]:
+        return [{
+            "id": "445",
+            "score": 0.91,
+            "payload": {"document_id": "445", "title": "Resolve Veeva Vault Login Timeouts", "reference": "Veeva Doc #445"},
+        }][:limit]
+
+
 def _validate_base64_image(image_base64: str) -> None:
     try:
         if not base64.b64decode(image_base64, validate=True):

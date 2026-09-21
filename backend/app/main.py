@@ -21,10 +21,13 @@ from change_mgmt.risk_calendar import BlackoutWindow, ConfigurationItem, MockCMD
 from change_mgmt.veeva_rules import VeevaRulesParser
 from triage.drafter import DraftType, draft_response
 from triage.servicenow_relational import InMemoryServiceNowAdapter, ServiceNowRelationshipService, ServiceNowTicket
-from triage.vision_search import QdrantVectorStore, TerraVisionClient, VisionSearchService
+from triage.vision_search import MockQdrantVectorStore, MockTerraVisionClient, QdrantVectorStore, TerraVisionClient, VisionSearchService
 from predictive.drift_detector import DriftDetector
 from predictive.problem_builder import ProblemRecordBuilder
 from predictive.rca_engine import LogTrace, MockLLMContextAdapter, RootCauseEngine, TicketHistory
+from core.errors import install_exception_handlers
+from core.health import router as health_router
+from core.redaction import RedactionMiddleware
 
 app = FastAPI(title="ITSM Copilot API", version="0.1.0")
 app.add_middleware(
@@ -34,6 +37,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RedactionMiddleware)
+install_exception_handlers(app)
+app.include_router(health_router)
 
 _VEEVA_MOCK_OUTPUTS = (
     {"document_id": "Veeva Doc #501", "page": 4, "text": "Low change: service owner approval and documented validation are required."},
@@ -69,6 +75,8 @@ class VisionTriageResponse(BaseModel):
 
 
 def get_vision_service() -> VisionSearchService:
+    if os.getenv("COPILOT_ADAPTER_MODE", "mock").lower() == "mock":
+        return VisionSearchService(vision_client=MockTerraVisionClient(), vector_store=MockQdrantVectorStore())
     return VisionSearchService(
         vision_client=TerraVisionClient(
             base_url=os.getenv("TERRA_VISION_BASE_URL", "https://api.terra.example"),
