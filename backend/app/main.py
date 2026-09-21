@@ -1,25 +1,58 @@
 import os
+from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from app.models import AuditLogRequest, AuditLogResponse, ChangeRequestPayload, PlaybookRequest
+from app.models import (
+    AuditLogRequest,
+    AuditLogResponse,
+    ChangeRequestPayload,
+    DriftRequest,
+    PlaybookRequest,
+    ProblemRequest,
+    RCARequest,
+)
 from audit.gdrive_audit import AuditLogger, MockGoogleDriveDocsAdapter
 from audit.playbook_gen import PlaybookGenerator
 from change_mgmt.cr_builder import ChangeRequestBuilder
-from change_mgmt.risk_calendar import MockCMDBCalendarAdapter, RiskCalendarService
+from change_mgmt.risk_calendar import BlackoutWindow, ConfigurationItem, MockCMDBCalendarAdapter, RiskCalendarService
 from change_mgmt.veeva_rules import VeevaRulesParser
 from triage.drafter import DraftType, draft_response
+from triage.servicenow_relational import InMemoryServiceNowAdapter, ServiceNowRelationshipService, ServiceNowTicket
 from triage.vision_search import QdrantVectorStore, TerraVisionClient, VisionSearchService
+from predictive.drift_detector import DriftDetector
+from predictive.problem_builder import ProblemRecordBuilder
+from predictive.rca_engine import LogTrace, MockLLMContextAdapter, RootCauseEngine, TicketHistory
 
 app = FastAPI(title="ITSM Copilot API", version="0.1.0")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "http://localhost:5173").split(","),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 _VEEVA_MOCK_OUTPUTS = (
     {"document_id": "Veeva Doc #501", "page": 4, "text": "Low change: service owner approval and documented validation are required."},
     {"document_id": "Veeva Doc #501", "page": 7, "text": "Normal change: change manager approval, test plan, and backout plan are required."},
     {"document_id": "Veeva Doc #501", "page": 11, "text": "Emergency change: emergency change manager authorization must be recorded."},
 )
-_AUDIT_LOGGER = AuditLogger(MockGoogleDriveDocsAdapter())
+_AUDIT_ADAPTER = MockGoogleDriveDocsAdapter()
+_AUDIT_LOGGER = AuditLogger(_AUDIT_ADAPTER)
+_CHANGE_RISK_ADAPTER = MockCMDBCalendarAdapter(
+    cis=[ConfigurationItem("CI-VAULT", "critical", "platform-ops")],
+    blackouts=[BlackoutWindow("Quarter close", datetime(2026, 10, 1, 8, tzinfo=timezone.utc), datetime(2026, 10, 1, 12, tzinfo=timezone.utc), ("CI-VAULT",))],
+)
+_INCIDENT_STORE = InMemoryServiceNowAdapter(
+    [
+        ServiceNowTicket("parent-1", "INC0010001", "Veeva Vault login timeout", "In Progress", problem_id="prb-7"),
+        ServiceNowTicket("child-1", "INC0010002", "Veeva Vault login timeout for EU user", "New", parent="parent-1"),
+    ],
+    problems={"prb-7": {"number": "PRB0000007", "short_description": "Vault authentication latency"}},
+)
 
 
 class VisionTriageRequest(BaseModel):
@@ -74,9 +107,25 @@ async def triage_vision(payload: VisionTriageRequest) -> VisionTriageResponse:
     )
 
 
+@app.get("/api/v1/triage/incidents/{ticket_id}/relationships")
+async def incident_relationships(ticket_id: str) -> dict:
+    try:
+        result = await ServiceNowRelationshipService(_INCIDENT_STORE).traverse_relationships(ticket_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    ticket = result["ticket"]
+    parent = result["parent"]
+    return {
+        "ticket": {"sys_id": ticket.sys_id, "number": ticket.number, "short_description": ticket.short_description, "state": ticket.state},
+        "parent": {"sys_id": parent.sys_id, "number": parent.number, "short_description": parent.short_description} if parent else None,
+        "children": [{"sys_id": child.sys_id, "number": child.number, "short_description": child.short_description, "state": child.state} for child in result["children"]],
+        "problem": result["problem"],
+    }
+
+
 @app.post("/api/v1/changes")
 async def create_change(payload: ChangeRequestPayload) -> dict:
-    assessment = await RiskCalendarService(MockCMDBCalendarAdapter()).assess(
+    assessment = await RiskCalendarService(_CHANGE_RISK_ADAPTER).assess(
         ci_ids=payload.ci_ids,
         starts_at=payload.planned_start,
         ends_at=payload.planned_end,
@@ -101,6 +150,42 @@ async def create_audit_log(payload: AuditLogRequest) -> AuditLogResponse:
     return AuditLogResponse(entry_id=entry.entry_id, recorded_at=entry.recorded_at, location=location, payload=entry.payload)
 
 
+@app.get("/api/v1/audit", response_model=list[AuditLogResponse])
+async def list_audit_logs() -> list[AuditLogResponse]:
+    return [
+        AuditLogResponse(entry_id=entry.entry_id, recorded_at=entry.recorded_at, location=f"mock-gdrive://itsm-copilot-audit/{entry.entry_id}", payload=entry.payload)
+        for entry in reversed(_AUDIT_ADAPTER.entries)
+    ]
+
+
 @app.post("/api/v1/audit/playbook")
 async def generate_playbook(payload: PlaybookRequest) -> dict:
     return PlaybookGenerator().generate(payload).as_dict()
+
+
+@app.post("/api/v1/predictive/rca")
+async def predictive_rca(payload: RCARequest) -> dict:
+    try:
+        analysis = await RootCauseEngine(MockLLMContextAdapter()).analyse(
+            [LogTrace(trace.trace_id, trace.content) for trace in payload.logs],
+            [TicketHistory(ticket.number, ticket.summary, ticket.impact) for ticket in payload.tickets],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return analysis.as_dict()
+
+
+@app.post("/api/v1/predictive/problem")
+async def predictive_problem(payload: ProblemRequest) -> dict:
+    return ProblemRecordBuilder().build(
+        service=payload.service,
+        summary=payload.summary,
+        incident_numbers=payload.incident_numbers,
+        recurrence_count=payload.recurrence_count,
+        high_impact_outage=payload.high_impact_outage,
+    ).as_dict()
+
+
+@app.post("/api/v1/predictive/drift")
+async def predictive_drift(payload: DriftRequest) -> dict:
+    return DriftDetector().detect(payload.ci_id, payload.snapshot, payload.baseline).as_dict()

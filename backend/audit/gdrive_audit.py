@@ -19,7 +19,10 @@ def redact(value: Any) -> Any:
 
 def _is_sensitive(key: str) -> bool:
     lower_key = key.lower().replace("-", "_")
-    return any(marker in lower_key for marker in ("password", "token", "secret", "api_key", "authorization", "cookie"))
+    return any(marker in lower_key for marker in (
+        "password", "token", "secret", "api_key", "authorization", "cookie",
+        "patient", "phi", "mrn", "medical_record", "date_of_birth", "dob", "ssn", "email", "phone",
+    ))
 
 
 @dataclass(frozen=True)

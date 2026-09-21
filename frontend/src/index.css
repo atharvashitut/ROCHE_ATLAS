@@ -2,4 +2,5 @@
 @tailwind components;
 @tailwind utilities;
 
-html { font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+html { font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #020617; }
+button, input { font: inherit; }

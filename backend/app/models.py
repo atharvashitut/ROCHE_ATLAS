@@ -95,3 +95,46 @@ class PlaybookRequest(_StrictModel):
         if self.planned_end <= self.planned_start:
             raise ValueError("planned_end must be after planned_start")
         return self
+
+
+class RCAEvidenceLog(_StrictModel):
+    trace_id: str = Field(min_length=2, max_length=80)
+    content: str = Field(min_length=3, max_length=8000)
+
+
+class RCATicketHistory(_StrictModel):
+    number: str = Field(pattern=r"^INC[A-Z0-9-]{3,40}$")
+    summary: str = Field(min_length=3, max_length=1000)
+    impact: str = Field(default="medium", pattern=r"^(low|medium|high|critical)$")
+
+
+class RCARequest(_StrictModel):
+    logs: list[RCAEvidenceLog] = Field(default_factory=list, max_length=30)
+    tickets: list[RCATicketHistory] = Field(default_factory=list, max_length=30)
+
+    @model_validator(mode="after")
+    def has_evidence(self) -> "RCARequest":
+        if not self.logs and not self.tickets:
+            raise ValueError("at least one log or ticket is required")
+        return self
+
+
+class ProblemRequest(_StrictModel):
+    service: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=8, max_length=500)
+    incident_numbers: list[str] = Field(min_length=1, max_length=50)
+    recurrence_count: int = Field(ge=0, le=10000)
+    high_impact_outage: bool = False
+
+    @field_validator("incident_numbers")
+    @classmethod
+    def valid_incident_numbers(cls, values: list[str]) -> list[str]:
+        if any(not value.startswith("INC") or len(value) < 6 for value in values):
+            raise ValueError("incident_numbers must contain ServiceNow INC references")
+        return values
+
+
+class DriftRequest(_StrictModel):
+    ci_id: str = Field(min_length=2, max_length=120)
+    snapshot: dict[str, Any] = Field(min_length=1, max_length=100)
+    baseline: dict[str, Any] = Field(min_length=1, max_length=100)
