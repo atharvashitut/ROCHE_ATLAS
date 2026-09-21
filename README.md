@@ -1,4 +1,6 @@
-# ITSM-Copilot
+# ROCHE_ATLAS
+
+## ITSM-Copilot
 
 Phase 1 establishes a FastAPI triage API, a React/Tailwind operator UI, and a local Qdrant vector database.
 
