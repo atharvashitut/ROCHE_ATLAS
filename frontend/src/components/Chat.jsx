@@ -1,0 +1,35 @@
+import { useState } from 'react'
+import { queryCopilot } from '../api'
+
+const quickActions = [
+  { label: 'Generate CR', action: 'generate_cr', prompt: 'Generate a change request draft.' },
+  { label: 'Generate RCA', action: 'generate_rca', prompt: 'Generate a root cause analysis draft.' },
+]
+
+export default function Chat() {
+  const [messages, setMessages] = useState([{ role: 'assistant', text: 'I am ATLAS Co-Pilot. Ask about the current ITSM workload or generate a CR/RCA draft.' }])
+  const [message, setMessage] = useState('')
+  const [sending, setSending] = useState(false)
+  const [error, setError] = useState('')
+
+  async function submit(event, action = 'chat', preset) {
+    event?.preventDefault()
+    const text = preset || message.trim()
+    if (!text || sending) return
+    setMessages((current) => [...current, { role: 'user', text }])
+    setMessage(''); setError(''); setSending(true)
+    try {
+      const result = await queryCopilot({ message: text, action })
+      setMessages((current) => [...current, { role: 'assistant', text: result.response }])
+    } catch (requestError) { setError(requestError.message) }
+    finally { setSending(false) }
+  }
+
+  return <section className="mx-auto flex min-h-[calc(100vh-6rem)] max-w-5xl flex-col px-4 py-8 sm:px-6">
+    <div><p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-300">Conversational operations</p><h1 className="mt-2 text-3xl font-bold">ATLAS Co-Pilot</h1><p className="mt-2 text-slate-400">Turn the current incident context into clear operational next steps.</p></div>
+    <div className="mt-6 flex flex-wrap gap-3">{quickActions.map((item) => <button key={item.action} type="button" disabled={sending} onClick={(event) => submit(event, item.action, item.prompt)} className="rounded-lg border border-indigo-400/60 bg-indigo-500/10 px-4 py-2 text-sm font-semibold text-indigo-100 hover:bg-indigo-500/20 disabled:opacity-50">{item.label}</button>)}</div>
+    <div className="mt-6 flex-1 space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">{messages.map((item, index) => <div key={`${item.role}-${index}`} className={`max-w-3xl rounded-xl px-4 py-3 text-sm leading-6 ${item.role === 'user' ? 'ml-auto bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}`}>{item.text}</div>)}{sending && <p className="text-sm text-slate-400">ATLAS is drafting a response…</p>}</div>
+    {error && <p className="mt-3 text-sm text-rose-300" role="alert">Unable to query co-pilot: {error}</p>}
+    <form onSubmit={submit} className="mt-5 flex gap-3"><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Ask a question about the ITSM queue…" className="min-w-0 flex-1 rounded-xl border border-slate-600 bg-slate-900 px-4 py-3 outline-none placeholder:text-slate-500 focus:border-cyan-400" /><button disabled={sending} className="rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60">Send</button></form>
+  </section>
+}
