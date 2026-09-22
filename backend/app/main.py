@@ -29,11 +29,16 @@ def topology_payload(ticket: Ticket) -> dict[str, object]:
     """Return the ServiceNow relationship graph needed by chat and ticket inspectors."""
 
     return {
-        "parent_inc": ticket.parent_inc,
-        "current_ticket": {"number": ticket.number, "title": ticket.title, "type": ticket.type},
-        "child_incs": ticket.child_incs,
-        "linked_prb": ticket.linked_prb,
-        "linked_chg": ticket.linked_chg,
+        "record_type": ticket.type,
+        "current_ticket": {"number": ticket.number, "short_description": ticket.short_description, "state": ticket.state, "type": ticket.type},
+        "parent_incident": ticket.parent_incident if ticket.type == "INC" else None,
+        "child_incidents": ticket.child_incidents if ticket.type == "INC" else [],
+        "linked_prb": ticket.linked_prb if ticket.type == "INC" else None,
+        "originating_ticket": ticket.originating_ticket if ticket.type == "CHG" else None,
+        "ctasks": ticket.ctasks if ticket.type == "CHG" else [],
+        "originating_incidents": ticket.originating_incidents if ticket.type == "PRB" else [],
+        "ptasks": ticket.ptasks if ticket.type == "PRB" else [],
+        "linked_chg": ticket.linked_chg if ticket.type in {"INC", "PRB"} else None,
     }
 
 

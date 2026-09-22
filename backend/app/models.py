@@ -63,11 +63,18 @@ class Ticket(BaseModel):
     rca_phase: str | None = None
     cab_status: str | None = None
     risk_level: str | None = None
-    parent_incident: str | None = None
-    child_incident_ids: list[str] = Field(default_factory=list)
+    # Public topology fields follow the ServiceNow relationship direction for each
+    # record type. The *_id fields below remain internal mock-data inputs only.
+    parent_incident: dict[str, object] | None = None
+    originating_ticket: dict[str, object] | None = None
+    originating_incidents: list[dict[str, object]] = Field(default_factory=list)
+    parent_incident_id: str | None = Field(default=None, exclude=True)
+    originating_ticket_id: str | None = Field(default=None, exclude=True)
+    originating_incident_ids: list[str] = Field(default_factory=list, exclude=True)
+    child_incident_ids: list[str] = Field(default_factory=list, exclude=True)
     child_incidents: list[dict[str, object]] = Field(default_factory=list)
-    linked_problem: str | None = None
-    linked_change: str | None = None
+    linked_problem: str | None = Field(default=None, exclude=True)
+    linked_change: str | None = Field(default=None, exclude=True)
     latest_work_notes: str
     closure_notes: str = ""
     resources: dict[str, str]
@@ -81,8 +88,8 @@ class Ticket(BaseModel):
     sctasks: list[dict[str, object]] = Field(default_factory=list)
     close_code: str | None = None
     close_notes: str | None = None
-    parent_inc: dict[str, object] | None = None
-    child_incs: list[dict[str, object]] = Field(default_factory=list)
+    parent_inc: dict[str, object] | None = Field(default=None, exclude=True)
+    child_incs: list[dict[str, object]] = Field(default_factory=list, exclude=True)
     linked_prb: dict[str, object] | None = None
     linked_chg: dict[str, object] | None = None
     knowledge_refs: list[dict[str, str]] = Field(default_factory=list)
@@ -225,7 +232,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="INC0048103", type="INC", record_type="INC", title="Token refresh failure for clinical operations users",
         description="Child incident tracking the token refresh symptom reported by clinical operations.", state="In Progress",
         priority="P2", assignee="Maya Chen", assignment_group="QMS Compliance Ops", sla_status="AT_RISK", sla_remaining_mins=85, sentiment="Impatient",
-        parent_incident="INC0048102", linked_problem="PRB0019201", linked_change="CHG0092100",
+        parent_incident_id="INC0048102", linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="Reproduced with the affected policy group and attached traces to the problem record.",
         closure_notes="Close after the corrective change has been verified in production.",
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / Token-Refresh-Validation", "GDrive": "ATLAS / Major Incidents / INC0048103"},
@@ -234,7 +241,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="PRB0019201", type="PRB", record_type="PRB", title="Authentication policy refresh regression",
         description="Root-cause investigation for the policy refresh regression behind linked incidents.", state="Root Cause Analysis",
         priority="P1", assignee="Omar Rahman", assignment_group="Integration Middleware", rca_phase="RCA In Progress", risk_level="High Impact",
-        parent_incident="INC0048102", child_incident_ids=["INC0048103"], linked_change="CHG0092100",
+        originating_incident_ids=["INC0048102"], linked_change="CHG0092100",
         latest_work_notes="RCA points to an expired claim mapping included in the policy baseline.",
         closure_notes="Problem remains open until the change review confirms corrective controls.",
         ptasks=[{"id": "PTASK001", "title": "Collect qRFC queue lock traces", "state": "Closed"}, {"id": "PTASK002", "title": "Validate middleware retry policy", "state": "Open"}, {"id": "PTASK003", "title": "Review preventive monitoring threshold", "state": "Pending"}],
@@ -244,7 +251,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="CHG0092100", type="CHG", record_type="CHG", title="Emergency Patch for SAP EWM qRFC Queue Recovery",
         description="Emergency change to deploy the approved SAP EWM qRFC queue recovery patch.", state="Implement",
         priority="P2", assignee="Elena Rossi", assignment_group="Integration Middleware", cab_status="CAB Approved", risk_level="Emergency Change",
-        parent_incident="INC0048102", child_incident_ids=["INC0048103"], linked_problem="PRB0019201",
+        originating_ticket_id="PRB0019201", linked_problem="PRB0019201",
         latest_work_notes="Emergency CAB approved the controlled qRFC recovery patch and implementation is underway.",
         closure_notes="Post-implementation validation will confirm authentication and token refresh recovery.",
         ctasks=[{"id": "CTASK001", "title": "Pre-patch backup", "state": "Closed", "close_notes": "Validated backup checksum and recovery point."}, {"id": "CTASK002", "title": "Deploy patch", "state": "Open"}],
@@ -299,7 +306,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="INC0048111", type="INC", record_type="INC", title="SAP MM PO Workflow Child Approval Exception",
         description="Child incident for a purchasing group whose PO approval substitution rule is not being applied.", state="In Progress",
         priority="P2", assignee="Nina Keller", assignment_group="SAP MM Support", sla_status="AT_RISK", sla_remaining_mins=90, sentiment="Impatient",
-        parent_incident="INC0048110", latest_work_notes="Approval exception has been isolated to the purchasing-group substitution configuration.",
+        parent_incident_id="INC0048110", latest_work_notes="Approval exception has been isolated to the purchasing-group substitution configuration.",
         closure_notes="Close after the substitution rule is restored and PO approval completes.",
         additional_comments=["Buyer supplied a failing PO example and approval timestamp.", "Customer-visible update: the purchasing group exception is under active correction."],
         resources={"KBA": "KBA-SAP-MM-119 — PO approval child exception", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-approval-child-SUD.pdf"},
@@ -406,21 +413,51 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
 
 
 def _enrich_relationship_topology() -> None:
-    """Normalize legacy ID links into chat-ready ServiceNow relationship objects."""
+    """Publish only valid, type-specific ServiceNow ITIL relationship graphs."""
 
     for ticket in MOCK_DB.values():
-        if ticket.parent_incident and ticket.parent_incident in MOCK_DB:
-            ticket.parent_inc = _relationship_snapshot(ticket.parent_incident)
-        ticket.child_incs = [
-            _relationship_snapshot(child_id, include_close_notes=True)
-            for child_id in ticket.child_incident_ids
-            if child_id in MOCK_DB
-        ]
-        ticket.child_incidents = ticket.child_incs
-        if ticket.linked_problem and ticket.linked_problem in MOCK_DB:
-            ticket.linked_prb = _relationship_snapshot(ticket.linked_problem)
-        if ticket.linked_change and ticket.linked_change in MOCK_DB:
-            ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
+        # Reset display relationships so legacy links cannot leak into an invalid graph.
+        ticket.parent_incident = None
+        ticket.parent_inc = None
+        ticket.originating_ticket = None
+        ticket.originating_incidents = []
+        ticket.child_incs = []
+        ticket.child_incidents = []
+        ticket.linked_prb = None
+        ticket.linked_chg = None
+
+        if ticket.type == "INC":
+            if ticket.parent_incident_id in MOCK_DB:
+                ticket.parent_incident = _relationship_snapshot(ticket.parent_incident_id)
+                # parent_inc is retained as a transition alias for existing consumers.
+                ticket.parent_inc = ticket.parent_incident
+            elif ticket.child_incident_ids:
+                children = [
+                    _relationship_snapshot(child_id, include_close_notes=True)
+                    for child_id in ticket.child_incident_ids
+                    if child_id in MOCK_DB and MOCK_DB[child_id].type == "INC"
+                ]
+                ticket.child_incs = children
+                ticket.child_incidents = children
+            if ticket.linked_problem in MOCK_DB:
+                ticket.linked_prb = _relationship_snapshot(ticket.linked_problem)
+            if ticket.linked_change in MOCK_DB:
+                ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
+
+        elif ticket.type == "PRB":
+            ticket.originating_incidents = [
+                _relationship_snapshot(incident_id)
+                for incident_id in ticket.originating_incident_ids
+                if incident_id in MOCK_DB and MOCK_DB[incident_id].type == "INC"
+            ]
+            if ticket.linked_change in MOCK_DB:
+                ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
+
+        elif ticket.type == "CHG":
+            if ticket.originating_ticket_id in MOCK_DB:
+                ticket.originating_ticket = _relationship_snapshot(ticket.originating_ticket_id)
+            # CHGs intentionally expose only their originating ticket and CTasks.
+            ticket.child_incident_ids = []
 
 
 _enrich_relationship_topology()
