@@ -34,7 +34,12 @@ def chat_response(query: ChatQuery) -> str:
         title = ticket.title if ticket else "the reported service issue"
         return f"RCA draft{context}: The observed impact is {title}. The mock evidence points to a policy claim mapping regression. Correct the mapping, validate token refresh, and add a pre-release claim validation control."
     if ticket:
-        return f"{ticket.id} is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}. Health is {calculate_health_color(ticket)} because SLA is {ticket.sla_status} ({ticket.sla_minutes} minutes) and sentiment is {ticket.sentiment}. {ticket.latest_work_notes}"
+        context = f"{ticket.id} ({ticket.type}) is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}."
+        if ticket.type in {"INC", "RITM"}:
+            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {ticket.sentiment}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
+        if ticket.type == "PRB":
+            return f"{context} RCA phase is {ticket.rca_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
+        return f"{context} CAB status is {ticket.cab_status} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
     return "ATLAS Co-Pilot is using deterministic mock ticket data. Ask about a ticket ID, or select a ticket to generate a focused CR or RCA draft."
 
 
@@ -60,13 +65,20 @@ def get_ticket(ticket_id: str) -> dict[str, dict]:
 
 
 @app.post("/api/chat/query")
-def query_chat(query: ChatQuery) -> dict[str, str | None]:
+def query_chat(query: ChatQuery) -> dict[str, object]:
     if query.ticket_id and query.ticket_id.upper() not in MOCK_DB:
         raise HTTPException(status_code=404, detail=f"Ticket {query.ticket_id} was not found")
     normalized_id = query.ticket_id.upper() if query.ticket_id else None
     normalized_query = query.model_copy(update={"ticket_id": normalized_id})
     response = chat_response(normalized_query)
-    return {"response": response, "action": normalized_query.action, "ticket_id": normalized_id, "generated_content": response if normalized_query.action != "chat" else None}
+    ticket = MOCK_DB.get(normalized_id) if normalized_id else None
+    return {
+        "response": response,
+        "action": normalized_query.action,
+        "ticket_id": normalized_id,
+        "generated_content": response if normalized_query.action != "chat" else None,
+        "ticket": ticket_payload(ticket) if ticket else None,
+    }
 
 
 class SPAStaticFiles(StaticFiles):
