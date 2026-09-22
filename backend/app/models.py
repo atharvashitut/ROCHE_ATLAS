@@ -235,6 +235,16 @@ MOCK_DB: dict[str, Ticket] = {
         closure_notes="Close after the corrective change has been verified in production.",
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / Token-Refresh-Validation", "GDrive": "ATLAS / Major Incidents / INC0048103"},
     ),
+    "INC0048109": Ticket(
+        id="INC0048109", type="INC", record_type="INC", title="Warehouse scanners unable to post goods issue",
+        description="Warehouse handheld scanners cannot post goods issue while the SAP EWM qRFC queue remains locked and memory pressure delays replication.", state="New",
+        priority="P1", assignee="Maya Chen", assignment_group="SAP EWM Support", sla_status="AT_RISK", sla_remaining_mins=55, sentiment="Impatient",
+        parent_incident={"sys_id": "sys_inc_1", "number": "INC0048102", "short_description": "SAP EWM qRFC Queue Lock", "state": "In Progress"},
+        latest_work_notes="Warehouse operations supplied failed goods-issue timestamps for correlation with the qRFC queue backlog.",
+        additional_comments=["Operators cannot confirm goods issue from affected scanner queues.", "Customer-visible update: SAP EWM support is correlating the scanner failures with the active qRFC recovery."],
+        historical_tickets=[{"id": "INC0038810", "title": "Warehouse scanner posting delay", "resolution_date": "8 months ago", "close_notes_snippet": "Cleared the blocked qRFC queue after validating the warehouse replication worker.", "relevance_score": 76}],
+        resources={"KBA": "KBA-SAP-EWM-1062 — Scanner goods issue queue recovery", "Veeva": "Veeva Vault / Warehouse / EWM-Scanner-Recovery-SOP", "GDrive": "ATLAS / SAP KT Hub / EWM / Scanner-goods-issue-recovery-video"},
+    ),
     "PRB0019201": Ticket(
         id="PRB0019201", type="PRB", record_type="PRB", title="SAP EWM qRFC Queue Lock & Memory Exhaustion",
         description="Root-cause investigation into SAP EWM qRFC queue locks and memory exhaustion that stall warehouse replication.", state="Root Cause Analysis",

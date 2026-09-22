@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { queryCopilot } from '../api'
+import { fetchTicket, queryCopilot } from '../api'
 import KnowledgeReferences from './KnowledgeReferences'
+import TicketCard from './TicketCard'
 import TopologyTree from './TopologyTree'
 import WorkItemActivities from './WorkItemActivities'
 
@@ -15,6 +16,19 @@ export default function Chat() {
   const [message, setMessage] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState('')
+  const [selectedTicket, setSelectedTicket] = useState(null)
+
+  async function openTicket(ticketId) {
+    setError('')
+    setSelectedTicket({ loading: true })
+    try {
+      const result = await fetchTicket(ticketId)
+      setSelectedTicket(result.ticket)
+    } catch (requestError) {
+      setError(requestError.message)
+      setSelectedTicket(null)
+    }
+  }
 
   async function submit(event, action = 'chat', preset) {
     event?.preventDefault()
@@ -38,8 +52,9 @@ export default function Chat() {
   return <section className="mx-auto flex min-h-[calc(100vh-6rem)] max-w-5xl flex-col px-4 py-8 sm:px-6">
     <div><p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-300">Conversational operations</p><h1 className="mt-2 text-3xl font-bold">ATLAS Co-Pilot</h1><p className="mt-2 text-slate-400">Turn the current incident context into clear operational next steps.</p></div>
     <div className="mt-6 flex flex-wrap gap-3">{quickActions.map((item) => <button key={item.action} type="button" disabled={sending} onClick={(event) => submit(event, item.action, item.prompt)} className="rounded-lg border border-indigo-400/60 bg-indigo-500/10 px-4 py-2 text-sm font-semibold text-indigo-100 hover:bg-indigo-500/20 disabled:opacity-50">{item.label}</button>)}</div>
-    <div className="mt-6 flex-1 space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">{messages.map((item, index) => <div key={`${item.role}-${index}`} className={`max-w-3xl rounded-xl px-4 py-3 text-sm leading-6 ${item.role === 'user' ? 'ml-auto bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}`}><p>{item.text}</p>{item.ticket && <div className="mt-4 space-y-3"><section className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3"><p className="text-xs font-semibold uppercase tracking-wider text-cyan-200">AI Solution / Resolution Breakdown</p><p className="mt-2 text-sm text-slate-300">{item.resolutionGuide}</p></section><TopologyTree ticket={item.ticket} /><WorkItemActivities ticket={item.ticket} />{closedStates.has(item.ticket.state) && item.ticket.close_notes && <section className="rounded-lg border border-slate-700 p-3"><p className="text-xs font-semibold uppercase tracking-wider text-slate-300">Closure Notes</p><p className="mt-2 text-sm text-slate-300">{item.ticket.close_notes}</p></section>}<KnowledgeReferences references={item.knowledgeRefs} /></div>}</div>)}{sending && <p className="text-sm text-slate-400">ATLAS is drafting a response…</p>}</div>
+    <div className="mt-6 flex-1 space-y-4 rounded-2xl border border-slate-700 bg-slate-900/70 p-5">{messages.map((item, index) => <div key={`${item.role}-${index}`} className={`max-w-3xl rounded-xl px-4 py-3 text-sm leading-6 ${item.role === 'user' ? 'ml-auto bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}`}><p>{item.text}</p>{item.ticket && <div className="mt-4 space-y-3"><section className="rounded-lg border border-cyan-500/30 bg-cyan-950/20 p-3"><p className="text-xs font-semibold uppercase tracking-wider text-cyan-200">AI Solution / Resolution Breakdown</p><p className="mt-2 text-sm text-slate-300">{item.resolutionGuide}</p></section><TopologyTree ticket={item.ticket} onSelectTicket={openTicket} /><WorkItemActivities ticket={item.ticket} />{closedStates.has(item.ticket.state) && item.ticket.close_notes && <section className="rounded-lg border border-slate-700 p-3"><p className="text-xs font-semibold uppercase tracking-wider text-slate-300">Closure Notes</p><p className="mt-2 text-sm text-slate-300">{item.ticket.close_notes}</p></section>}<KnowledgeReferences references={item.knowledgeRefs} /></div>}</div>)}{sending && <p className="text-sm text-slate-400">ATLAS is drafting a response…</p>}</div>
     {error && <p className="mt-3 text-sm text-rose-300" role="alert">Unable to query co-pilot: {error}</p>}
     <form onSubmit={submit} className="mt-5 flex gap-3"><input value={message} onChange={(event) => setMessage(event.target.value)} placeholder="Ask a question about the ITSM queue…" className="min-w-0 flex-1 rounded-xl border border-slate-600 bg-slate-900 px-4 py-3 outline-none placeholder:text-slate-500 focus:border-cyan-400" /><button disabled={sending} className="rounded-xl bg-cyan-500 px-5 py-3 font-semibold text-slate-950 hover:bg-cyan-400 disabled:opacity-60">Send</button></form>
+    {selectedTicket && <div className="fixed inset-0 z-30 bg-slate-950/70" role="presentation" onMouseDown={() => setSelectedTicket(null)}><aside role="dialog" aria-modal="true" aria-label="Selected topology ticket" className="ml-auto h-full w-full max-w-2xl shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>{selectedTicket.loading ? <div className="p-6 text-slate-300">Loading complete ticket record…</div> : <TicketCard ticket={selectedTicket} onClose={() => setSelectedTicket(null)} onSelectTicket={openTicket} />}</aside></div>}
   </section>
 }

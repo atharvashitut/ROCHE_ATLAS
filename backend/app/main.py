@@ -25,6 +25,27 @@ def ticket_payload(ticket: Ticket) -> dict:
     return {**ticket.model_dump(), "health_color": calculate_health_color(ticket)}
 
 
+def find_ticket_by_reference(ticket_reference: str) -> Ticket | None:
+    """Resolve a ServiceNow number, true sys_id, or topology snapshot sys_id."""
+
+    needle = ticket_reference.casefold()
+    for ticket in MOCK_DB.values():
+        if needle in {ticket.id.casefold(), ticket.number.casefold(), ticket.sys_id.casefold()}:
+            return ticket
+
+    relationship_records = (
+        (ticket.parent_incident, *ticket.child_incidents, ticket.linked_prb, ticket.linked_chg, *ticket.originating_tickets)
+        for ticket in MOCK_DB.values()
+    )
+    for records in relationship_records:
+        for record in records:
+            if not record:
+                continue
+            if needle in {str(record.get("number", "")).casefold(), str(record.get("sys_id", "")).casefold()}:
+                return MOCK_DB.get(str(record.get("number", "")).upper())
+    return None
+
+
 def topology_payload(ticket: Ticket) -> dict[str, object]:
     """Return the ServiceNow relationship graph needed by chat and ticket inspectors."""
 
@@ -107,7 +128,7 @@ def list_assignment_groups() -> dict[str, list[str]]:
 
 @app.get("/api/tickets/{ticket_id}")
 def get_ticket(ticket_id: str) -> dict[str, dict]:
-    ticket = MOCK_DB.get(ticket_id.upper())
+    ticket = find_ticket_by_reference(ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} was not found")
     return {"ticket": ticket_payload(ticket)}
