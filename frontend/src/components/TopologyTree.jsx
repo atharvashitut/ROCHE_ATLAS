@@ -5,6 +5,7 @@ const phaseMaps = {
   CHG: ['New', 'Assess', 'Authorize', 'Schedule', 'Implement', 'Review', 'Closed'],
   PRB: ['New', 'Assess', 'RCA', 'QA', 'Review', 'Closed'],
 }
+const closedStates = new Set(['Closed', 'Resolved', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped'])
 
 function nodeType(node) {
   if (node.type) return node.type
@@ -22,7 +23,8 @@ function PhaseStepper({ node }) {
 }
 
 function InspectorDrawer({ node, onClose }) {
-  return <div className="fixed inset-0 z-40 bg-slate-950/75" role="presentation" onMouseDown={onClose}><aside role="dialog" aria-modal="true" aria-label="Topology node inspector" className="ml-auto h-full w-full max-w-lg overflow-y-auto bg-slate-900 p-6 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="font-mono text-sm text-cyan-300">{node.number} · {nodeType(node)}</p><h3 className="mt-1 text-xl font-semibold">{node.title}</h3></div><button type="button" onClick={onClose} className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm hover:bg-slate-800">Close</button></div><PhaseStepper node={node} /><div className="mt-6"><WorkItemActivities ticket={{ ...node, type: nodeType(node) }} /></div><section className="mt-4 rounded-xl border border-slate-700 p-4"><h4 className="text-sm font-semibold">Closure notes</h4><p className="mt-2 text-sm leading-6 text-slate-300">{node.close_notes || 'No closure notes recorded.'}</p></section></aside></div>
+  const showClosure = closedStates.has(node.state) && node.close_notes
+  return <div className="fixed inset-0 z-40 bg-slate-950/75" role="presentation" onMouseDown={onClose}><aside role="dialog" aria-modal="true" aria-label="Topology node inspector" className="ml-auto h-full w-full max-w-lg overflow-y-auto bg-slate-900 p-6 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="font-mono text-sm text-cyan-300">{node.number} · {nodeType(node)}</p><h3 className="mt-1 text-xl font-semibold">{node.short_description || node.title}</h3></div><button type="button" onClick={onClose} className="rounded-lg border border-slate-600 px-3 py-1.5 text-sm hover:bg-slate-800">Close</button></div><PhaseStepper node={node} /><div className="mt-6"><WorkItemActivities ticket={{ ...node, type: nodeType(node) }} /></div>{showClosure && <section className="mt-4 rounded-xl border border-slate-700 p-4"><h4 className="text-sm font-semibold">Closure Notes</h4><p className="mt-2 text-sm leading-6 text-slate-300">{node.close_notes}</p></section>}</aside></div>
 }
 
 function TopologyNode({ label, node, onSelect, tone = 'slate' }) {
@@ -33,6 +35,6 @@ function TopologyNode({ label, node, onSelect, tone = 'slate' }) {
 
 export default function TopologyTree({ ticket }) {
   const [inspectedNode, setInspectedNode] = useState(null)
-  const current = { number: ticket.number || ticket.id, title: ticket.title, type: ticket.type, close_notes: ticket.close_notes, chg_phase: ticket.chg_phase, prb_phase: ticket.prb_phase, additional_comments: ticket.additional_comments, ctasks: ticket.ctasks, ptasks: ticket.ptasks }
+  const current = { number: ticket.number || ticket.id, title: ticket.title, short_description: ticket.short_description, state: ticket.state, type: ticket.type, close_notes: ticket.close_notes, chg_phase: ticket.chg_phase, prb_phase: ticket.prb_phase, comments: ticket.comments, child_incidents: ticket.child_incidents, ctasks: ticket.ctasks, ptasks: ticket.ptasks, sctasks: ticket.sctasks }
   return <section className="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><p className="mb-4 text-xs font-semibold uppercase tracking-wider text-cyan-300">Relational topology tree</p><div className="overflow-x-auto"><div className="flex min-w-max items-center gap-3"><TopologyNode label="Parent INC" node={ticket.parent_inc} onSelect={setInspectedNode} tone="cyan" /><span className="text-slate-500">→</span><TopologyNode label="Current Ticket" node={current} onSelect={setInspectedNode} tone="indigo" /><span className="text-slate-500">→</span><div className="grid gap-2"><TopologyNode label="Child INC" node={ticket.child_incs?.[0]} onSelect={setInspectedNode} tone="cyan" />{ticket.child_incs?.slice(1).map((child) => <TopologyNode key={child.number} label="Child INC" node={child} onSelect={setInspectedNode} tone="cyan" />)}</div><div className="grid gap-2"><TopologyNode label="Linked PRB" node={ticket.linked_prb} onSelect={setInspectedNode} tone="amber" /><TopologyNode label="Linked CHG" node={ticket.linked_chg} onSelect={setInspectedNode} tone="emerald" /></div></div></div><p className="mt-3 text-xs text-slate-500">Select any record to inspect its notes, closure information, and applicable phase.</p>{inspectedNode && <InspectorDrawer node={inspectedNode} onClose={() => setInspectedNode(null)} />}</section>
 }
