@@ -56,12 +56,18 @@ function IncidentGraph({ ticket, onSelect }) {
   return <><GraphColumn>{ticket.parent_incident ? <TopologyNode label="Parent Incident" node={ticket.parent_incident} onSelect={onSelect} tone="cyan" /> : <EmptyNode>No Parent INC</EmptyNode>}</GraphColumn><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelect={onSelect} /><span className="text-slate-500">→</span><GraphColumn>{children.map((child) => <TopologyNode key={child.number} label="Child Incident" node={child} onSelect={onSelect} tone="cyan" />)}{ticket.linked_prb && <TopologyNode label="Linked PRB" node={ticket.linked_prb} onSelect={onSelect} tone="amber" />}{ticket.linked_chg && <TopologyNode label="Linked CHG" node={ticket.linked_chg} onSelect={onSelect} tone="emerald" />}{!children.length && !ticket.linked_prb && !ticket.linked_chg && <EmptyNode>No downstream records</EmptyNode>}</GraphColumn></>
 }
 
+function OriginatingTickets({ tickets = [], onSelect }) {
+  if (!tickets.length) return <GraphColumn><EmptyNode>No originating tickets</EmptyNode></GraphColumn>
+  const plural = tickets.length > 1
+  return <GraphColumn>{plural && <p className="px-1 text-[10px] font-semibold uppercase tracking-wider text-slate-500">Originating Tickets ({tickets.length})</p>}{tickets.map((ticket) => <TopologyNode key={`${ticket.sys_id}-${ticket.number}`} label="Originating Ticket" node={ticket} onSelect={onSelect} tone="cyan" />)}</GraphColumn>
+}
+
 function ChangeGraph({ ticket, onSelect }) {
-  return <><GraphColumn>{ticket.originating_ticket ? <TopologyNode label="Originating Ticket" node={ticket.originating_ticket} onSelect={onSelect} tone="amber" /> : <EmptyNode>No originating ticket</EmptyNode>}</GraphColumn><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelect={onSelect} /><span className="text-slate-500">→</span><GraphColumn>{ticket.ctasks?.length ? ticket.ctasks.map((task) => <TopologyNode key={task.sys_id || task.number} label="CTask" node={task} onSelect={onSelect} tone="emerald" />) : <EmptyNode>No CTasks</EmptyNode>}</GraphColumn></>
+  return <><OriginatingTickets tickets={ticket.originating_tickets} onSelect={onSelect} /><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelect={onSelect} /><span className="text-slate-500">→</span><GraphColumn>{ticket.ctasks?.length ? ticket.ctasks.map((task) => <TopologyNode key={task.sys_id || task.number} label="CTask" node={task} onSelect={onSelect} tone="emerald" />) : <EmptyNode>No CTasks</EmptyNode>}</GraphColumn></>
 }
 
 function ProblemGraph({ ticket, onSelect }) {
-  return <><GraphColumn>{ticket.originating_incidents?.length ? ticket.originating_incidents.map((incident) => <TopologyNode key={incident.number} label="Originating Incident" node={incident} onSelect={onSelect} tone="cyan" />) : <EmptyNode>No originating INCs</EmptyNode>}</GraphColumn><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelect={onSelect} /><span className="text-slate-500">→</span><GraphColumn>{ticket.ptasks?.map((task) => <TopologyNode key={task.sys_id || task.number} label="PTask" node={task} onSelect={onSelect} tone="amber" />)}{ticket.linked_chg && <TopologyNode label="Linked Fix Change" node={ticket.linked_chg} onSelect={onSelect} tone="emerald" />}{!ticket.ptasks?.length && !ticket.linked_chg && <EmptyNode>No downstream records</EmptyNode>}</GraphColumn></>
+  return <><OriginatingTickets tickets={ticket.originating_tickets} onSelect={onSelect} /><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelect={onSelect} /><span className="text-slate-500">→</span><GraphColumn>{ticket.ptasks?.map((task) => <TopologyNode key={task.sys_id || task.number} label="PTask" node={task} onSelect={onSelect} tone="amber" />)}{ticket.linked_chg && <TopologyNode label="Linked Fix Change" node={ticket.linked_chg} onSelect={onSelect} tone="emerald" />}{!ticket.ptasks?.length && !ticket.linked_chg && <EmptyNode>No downstream records</EmptyNode>}</GraphColumn></>
 }
 
 function GenericGraph({ ticket, onSelect }) {

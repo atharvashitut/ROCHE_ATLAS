@@ -34,9 +34,8 @@ def topology_payload(ticket: Ticket) -> dict[str, object]:
         "parent_incident": ticket.parent_incident if ticket.type == "INC" else None,
         "child_incidents": ticket.child_incidents if ticket.type == "INC" else [],
         "linked_prb": ticket.linked_prb if ticket.type == "INC" else None,
-        "originating_ticket": ticket.originating_ticket if ticket.type == "CHG" else None,
+        "originating_tickets": ticket.originating_tickets if ticket.type in {"CHG", "PRB"} else [],
         "ctasks": ticket.ctasks if ticket.type == "CHG" else [],
-        "originating_incidents": ticket.originating_incidents if ticket.type == "PRB" else [],
         "ptasks": ticket.ptasks if ticket.type == "PRB" else [],
         "linked_chg": ticket.linked_chg if ticket.type in {"INC", "PRB"} else None,
     }

@@ -66,11 +66,9 @@ class Ticket(BaseModel):
     # Public topology fields follow the ServiceNow relationship direction for each
     # record type. The *_id fields below remain internal mock-data inputs only.
     parent_incident: dict[str, object] | None = None
-    originating_ticket: dict[str, object] | None = None
-    originating_incidents: list[dict[str, object]] = Field(default_factory=list)
+    originating_tickets: list[dict[str, object]] = Field(default_factory=list)
     parent_incident_id: str | None = Field(default=None, exclude=True)
-    originating_ticket_id: str | None = Field(default=None, exclude=True)
-    originating_incident_ids: list[str] = Field(default_factory=list, exclude=True)
+    originating_ticket_ids: list[str] = Field(default_factory=list, exclude=True)
     child_incident_ids: list[str] = Field(default_factory=list, exclude=True)
     child_incidents: list[dict[str, object]] = Field(default_factory=list)
     linked_problem: str | None = Field(default=None, exclude=True)
@@ -211,10 +209,10 @@ def calculate_health_color(ticket: Ticket) -> HealthColor:
 
 MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
-        id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock blocking warehouse replication",
+        id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
         priority="P1", assignee="Maya Chen", assignment_group="SAP EWM Support", sla_status="BREACHED", sla_remaining_mins=15, sentiment="Frustrated",
-        child_incident_ids=["INC0048103"], linked_problem="PRB0019201", linked_change="CHG0092100",
+        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
         additional_comments=["Warehouse operations reports outbound queues are locked after the replication job retry.", "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration team."],
@@ -229,32 +227,32 @@ MOCK_DB: dict[str, Ticket] = {
         resources={"KBA": "KBA-EWM-1010 — Sandbox role provisioning", "Veeva": "Veeva Vault / Access / EWM-1010-Roles", "GDrive": "ATLAS / Service Requests / RITM0094101"},
     ),
     "INC0048103": Ticket(
-        id="INC0048103", type="INC", record_type="INC", title="Token refresh failure for clinical operations users",
-        description="Child incident tracking the token refresh symptom reported by clinical operations.", state="In Progress",
+        id="INC0048103", type="INC", record_type="INC", title="Token refresh failure for operations users",
+        description="Child incident tracking the token refresh symptom reported by warehouse operations.", state="In Progress",
         priority="P2", assignee="Maya Chen", assignment_group="QMS Compliance Ops", sla_status="AT_RISK", sla_remaining_mins=85, sentiment="Impatient",
-        parent_incident_id="INC0048102", linked_problem="PRB0019201", linked_change="CHG0092100",
+        parent_incident={"sys_id": "sys_inc_1", "number": "INC0048102", "short_description": "SAP EWM qRFC Queue Lock", "state": "In Progress"}, linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="Reproduced with the affected policy group and attached traces to the problem record.",
         closure_notes="Close after the corrective change has been verified in production.",
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / Token-Refresh-Validation", "GDrive": "ATLAS / Major Incidents / INC0048103"},
     ),
     "PRB0019201": Ticket(
-        id="PRB0019201", type="PRB", record_type="PRB", title="Authentication policy refresh regression",
-        description="Root-cause investigation for the policy refresh regression behind linked incidents.", state="Root Cause Analysis",
+        id="PRB0019201", type="PRB", record_type="PRB", title="SAP EWM qRFC Queue Lock & Memory Exhaustion",
+        description="Root-cause investigation into SAP EWM qRFC queue locks and memory exhaustion that stall warehouse replication.", state="Root Cause Analysis",
         priority="P1", assignee="Omar Rahman", assignment_group="Integration Middleware", rca_phase="RCA In Progress", risk_level="High Impact",
-        originating_incident_ids=["INC0048102"], linked_change="CHG0092100",
-        latest_work_notes="RCA points to an expired claim mapping included in the policy baseline.",
-        closure_notes="Problem remains open until the change review confirms corrective controls.",
-        ptasks=[{"id": "PTASK001", "title": "Collect qRFC queue lock traces", "state": "Closed"}, {"id": "PTASK002", "title": "Validate middleware retry policy", "state": "Open"}, {"id": "PTASK003", "title": "Review preventive monitoring threshold", "state": "Pending"}],
-        resources={"KBA": "KBA-ATLAS-1057 — Claim mapping diagnostics", "Veeva": "Veeva Vault / Quality / PRB0019201-RCA", "GDrive": "ATLAS / Problems / PRB0019201"},
+        originating_tickets=[{"sys_id": "sys_inc_1", "number": "INC0048102", "short_description": "SAP EWM qRFC Queue Lock", "state": "In Progress"}, {"sys_id": "sys_inc_x", "number": "INC0048109", "short_description": "Warehouse scanners unable to post goods issue", "state": "New"}], linked_change="CHG0092100",
+        latest_work_notes="RCA isolated qRFC payload pressure and memory exhaustion during queue recovery.",
+        closure_notes="Problem remains open until the queue tuning and emergency patch are validated in production.",
+        ptasks=[{"id": "PTASK001", "title": "Collect qRFC queue lock traces", "state": "Closed"}, {"id": "PTASK002", "title": "Validate middleware retry policy", "state": "Work in Progress"}, {"id": "PTASK003", "title": "Review preventive monitoring threshold", "state": "New"}],
+        resources={"KBA": "KBA-SAP-EWM-1057 — qRFC queue and memory recovery", "Veeva": "Veeva Vault / Quality / PRB0019201-RCA", "GDrive": "ATLAS / Problems / PRB0019201"},
     ),
     "CHG0092100": Ticket(
         id="CHG0092100", type="CHG", record_type="CHG", title="Emergency Patch for SAP EWM qRFC Queue Recovery",
         description="Emergency change to deploy the approved SAP EWM qRFC queue recovery patch.", state="Implement",
         priority="P2", assignee="Elena Rossi", assignment_group="Integration Middleware", cab_status="CAB Approved", risk_level="Emergency Change",
-        originating_ticket_id="PRB0019201", linked_problem="PRB0019201",
+        originating_tickets=[{"sys_id": "sys_prb_1", "number": "PRB0019201", "short_description": "SAP EWM qRFC Queue Lock & Memory Exhaustion", "state": "Root Cause Analysis"}],
         latest_work_notes="Emergency CAB approved the controlled qRFC recovery patch and implementation is underway.",
         closure_notes="Post-implementation validation will confirm authentication and token refresh recovery.",
-        ctasks=[{"id": "CTASK001", "title": "Pre-patch backup", "state": "Closed", "close_notes": "Validated backup checksum and recovery point."}, {"id": "CTASK002", "title": "Deploy patch", "state": "Open"}],
+        ctasks=[{"id": "CTASK001", "title": "Pre-patch backup", "state": "Closed Complete", "close_notes": "Validated backup checksum and recovery point."}, {"id": "CTASK002", "title": "Deploy patch", "state": "Open"}],
         resources={"KBA": "KBA-ATLAS-1061 — Policy change validation", "Veeva": "Veeva Vault / Change Control / CHG0092100", "GDrive": "ATLAS / Changes / CHG0092100"},
     ),
     "INC0048104": Ticket(
@@ -417,21 +415,30 @@ def _enrich_relationship_topology() -> None:
 
     for ticket in MOCK_DB.values():
         # Reset display relationships so legacy links cannot leak into an invalid graph.
-        ticket.parent_incident = None
+        explicit_parent = ticket.parent_incident
+        explicit_originating = ticket.originating_tickets.copy()
+        explicit_children = ticket.child_incidents.copy()
         ticket.parent_inc = None
-        ticket.originating_ticket = None
-        ticket.originating_incidents = []
+        ticket.originating_tickets = []
         ticket.child_incs = []
         ticket.child_incidents = []
         ticket.linked_prb = None
         ticket.linked_chg = None
 
         if ticket.type == "INC":
-            if ticket.parent_incident_id in MOCK_DB:
+            if explicit_parent:
+                ticket.parent_incident = explicit_parent
+                ticket.parent_inc = explicit_parent
+            elif ticket.parent_incident_id in MOCK_DB:
                 ticket.parent_incident = _relationship_snapshot(ticket.parent_incident_id)
                 # parent_inc is retained as a transition alias for existing consumers.
                 ticket.parent_inc = ticket.parent_incident
-            elif ticket.child_incident_ids:
+            else:
+                ticket.parent_incident = None
+            if explicit_children and ticket.parent_incident is None:
+                ticket.child_incs = explicit_children
+                ticket.child_incidents = explicit_children
+            elif ticket.child_incident_ids and ticket.parent_incident is None:
                 children = [
                     _relationship_snapshot(child_id, include_close_notes=True)
                     for child_id in ticket.child_incident_ids
@@ -445,17 +452,22 @@ def _enrich_relationship_topology() -> None:
                 ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
 
         elif ticket.type == "PRB":
-            ticket.originating_incidents = [
-                _relationship_snapshot(incident_id)
-                for incident_id in ticket.originating_incident_ids
-                if incident_id in MOCK_DB and MOCK_DB[incident_id].type == "INC"
+            ticket.parent_incident = None
+            ticket.originating_tickets = explicit_originating or [
+                _relationship_snapshot(ticket_id)
+                for ticket_id in ticket.originating_ticket_ids
+                if ticket_id in MOCK_DB
             ]
             if ticket.linked_change in MOCK_DB:
                 ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
 
         elif ticket.type == "CHG":
-            if ticket.originating_ticket_id in MOCK_DB:
-                ticket.originating_ticket = _relationship_snapshot(ticket.originating_ticket_id)
+            ticket.parent_incident = None
+            ticket.originating_tickets = explicit_originating or [
+                _relationship_snapshot(ticket_id)
+                for ticket_id in ticket.originating_ticket_ids
+                if ticket_id in MOCK_DB
+            ]
             # CHGs intentionally expose only their originating ticket and CTasks.
             ticket.child_incident_ids = []
 
