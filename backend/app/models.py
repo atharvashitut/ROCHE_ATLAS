@@ -88,6 +88,7 @@ class Ticket(BaseModel):
     knowledge_refs: list[dict[str, str]] = Field(default_factory=list)
     ai_resolution_guide: str = ""
     similar_records: list[dict[str, object]] = Field(default_factory=list)
+    historical_tickets: list[dict[str, object]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def enrich_servicenow_fields(self) -> "Ticket":
@@ -255,6 +256,7 @@ MOCK_DB: dict[str, Ticket] = {
         priority="P2", assignee="Jonas Weber", assignment_group="SAP Basis Ops", sla_status="AT_RISK", sla_remaining_mins=70, sentiment="Impatient",
         latest_work_notes="Basis team is validating the affected technical user authorization profile.",
         closure_notes="Close after the scheduled batch completes successfully and finance validates output.",
+        historical_tickets=[{"id": "INC0031099", "title": "Batch user background auth failure", "resolution_date": "6 months ago", "close_notes_snippet": "Assigned SAP_ALL temporarily to batch user ALEREMOTE; permanently fixed via SU53 role adjustment.", "relevance_score": 85}, {"id": "RITM0088102", "title": "Missing background execution role", "resolution_date": "1 year ago", "close_notes_snippet": "Granted Z_BATCH_EXECUTION role to technical user.", "relevance_score": 78}],
         resources={"KBA": "KBA-SAP-2024 — Batch authorization diagnostics", "Veeva": "Veeva Vault / SAP / Batch-Access", "GDrive": "ATLAS / Incidents / INC0048104"},
     ),
     "RITM0094102": Ticket(
@@ -290,6 +292,7 @@ MOCK_DB: dict[str, Ticket] = {
         closure_notes="Close after test POs complete approval and the buyer confirms release processing.",
         additional_comments=["Buyers report that high-priority PO approvals have been waiting longer than two hours.", "SAP MM support is comparing the affected purchasing organization to the working template."],
         similar_records=[{"id": "PRB0018992", "score": 95, "title": "Historical Root Cause: PO Release Strategy Config Corruption", "state": "Closed", "resolution_date": "Last Month"}],
+        historical_tickets=[{"id": "INC0042911", "title": "PO Release Strategy sync failure", "resolution_date": "3 months ago", "close_notes_snippet": "Restarted the PO release workflow in SWPR. Users were able to approve immediately after.", "relevance_score": 82}],
         resources={"KBA": "KBA-SAP-MM-118 — PO workflow release diagnosis", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-workflow-SUD.pptx"},
     ),
     "INC0048111": Ticket(
