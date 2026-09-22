@@ -37,6 +37,31 @@ def topology_payload(ticket: Ticket) -> dict[str, object]:
     }
 
 
+def find_ticket_from_natural_language(query_text: str) -> str | None:
+    """Return the highest-scoring ticket from ServiceNow fields and knowledge sources."""
+
+    stop_words = {"a", "an", "and", "are", "for", "how", "is", "of", "please", "show", "status", "the", "this", "ticket", "what", "with"}
+    terms = [term for term in re.findall(r"[A-Z0-9]{2,}", query_text.upper()) if term.lower() not in stop_words and term != "SAP"]
+    best_id: str | None = None
+    best_score = 0
+    for ticket_id, ticket in MOCK_DB.items():
+        knowledge_text = " ".join(
+            " ".join(reference.values()) for reference in ticket.knowledge_refs
+        )
+        searchable_text = " ".join([
+            ticket.title,
+            ticket.description,
+            ticket.ai_resolution_guide,
+            " ".join(ticket.additional_comments),
+            " ".join(ticket.resources.values()),
+            knowledge_text,
+        ]).upper()
+        score = sum(term in searchable_text for term in terms)
+        if score > best_score:
+            best_id, best_score = ticket_id, score
+    return best_id if best_score else None
+
+
 def chat_response(query: ChatQuery) -> str:
     ticket = MOCK_DB.get(query.ticket_id) if query.ticket_id else None
     context = f" for {ticket.id}" if ticket else ""
@@ -94,15 +119,16 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         (ticket_id for ticket_id in MOCK_DB if ticket_id in query_text),
         None,
     )
+    found_id = found_id or find_ticket_from_natural_language(query_text)
     rca_intent = "RCA" in query_text or "ROOT CAUSE" in query_text
     cr_intent = bool(re.search(r"\bCR\b", query_text)) or "CHANGE" in query_text
 
     if query.action == "generate_rca" or rca_intent:
         action = "generate_rca"
-        normalized_id = "PRB0019201"
+        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "PRB" else "PRB0019201"
     elif query.action == "generate_cr" or cr_intent:
         action = "generate_cr"
-        normalized_id = "CHG0092100"
+        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "CHG" else "CHG0092100"
     else:
         action = "chat"
         normalized_id = found_id

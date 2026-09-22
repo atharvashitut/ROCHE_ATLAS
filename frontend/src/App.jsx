@@ -14,6 +14,6 @@ export default function App() {
         <nav aria-label="Primary"><div className="flex rounded-lg border border-slate-700 p-1">{tabs.map((tab) => <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)} aria-current={activeTab === tab.id ? 'page' : undefined} className={`rounded-md px-4 py-2 text-sm font-semibold transition ${activeTab === tab.id ? 'bg-cyan-400 text-slate-950' : 'text-slate-300 hover:text-white'}`}>{tab.label}</button>)}</div></nav>
       </div>
     </header>
-    <main>{activeTab === 'dashboard' ? <Dashboard /> : <Chat />}</main>
+    <main><div className={activeTab === 'dashboard' ? 'block' : 'hidden'}><Dashboard /></div><div className={activeTab === 'chat' ? 'block' : 'hidden'}><Chat /></div></main>
   </div>
 }

@@ -33,6 +33,9 @@ ALL_ASSIGNMENT_GROUPS = [
     "Observability & Monitoring",
     "End User Compute",
     "Enterprise Integration Services",
+    "SAP MM Support",
+    "SAP SD Support",
+    "SAP PLM Support",
 ]
 
 
@@ -67,11 +70,14 @@ class Ticket(BaseModel):
     chg_phase: str | None = None
     prb_phase: str | None = None
     work_notes: list[str] = Field(default_factory=list)
+    additional_comments: list[str] = Field(default_factory=list)
+    ctasks: list[dict[str, str]] = Field(default_factory=list)
+    ptasks: list[dict[str, str]] = Field(default_factory=list)
     close_notes: str | None = None
-    parent_inc: dict[str, str] | None = None
-    child_incs: list[dict[str, str]] = Field(default_factory=list)
-    linked_prb: dict[str, str] | None = None
-    linked_chg: dict[str, str] | None = None
+    parent_inc: dict[str, object] | None = None
+    child_incs: list[dict[str, object]] = Field(default_factory=list)
+    linked_prb: dict[str, object] | None = None
+    linked_chg: dict[str, object] | None = None
     knowledge_refs: list[dict[str, str]] = Field(default_factory=list)
     ai_resolution_guide: str = ""
 
@@ -82,6 +88,12 @@ class Ticket(BaseModel):
         self.sys_id = self.sys_id or f"mock-{self.id.lower()}-a71c"
         self.number = self.number or self.id
         self.work_notes = self.work_notes or [self.latest_work_notes]
+        if self.type in {"INC", "RITM"}:
+            self.additional_comments = self.additional_comments or self.work_notes.copy()
+        allowed_task_states = {"Pending", "Open", "Closed", "Closed Skipped"}
+        for task in [*self.ctasks, *self.ptasks]:
+            if task.get("state") not in allowed_task_states:
+                raise ValueError(f"Unsupported task state: {task.get('state')}")
         self.close_notes = self.close_notes or self.closure_notes
         if self.type == "PRB":
             self.prb_phase = self.prb_phase or ("RCA" if self.rca_phase else "Assess")
@@ -136,12 +148,13 @@ def calculate_health_color(ticket: Ticket) -> HealthColor:
 
 MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
-        id="INC0048102", type="INC", record_type="INC", title="Atlas desktop client cannot authenticate",
-        description="Several research users cannot sign in to the Atlas desktop client.", state="In Progress",
+        id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock blocking warehouse replication",
+        description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
         priority="P1", assignee="Maya Chen", assignment_group="SAP EWM Support", sla_status="BREACHED", sla_remaining_mins=15, sentiment="Frustrated",
         child_incidents=["INC0048103"], linked_problem="PRB0019201", linked_change="CHG0092100",
-        latest_work_notes="Identity team isolated a token refresh failure after the latest policy update.",
-        closure_notes="Pending validated remediation and confirmation from the affected research group.",
+        latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
+        closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
+        additional_comments=["Warehouse operations reports outbound queues are locked after the replication job retry.", "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration team."],
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / ATLAS-Auth-Investigation", "GDrive": "ATLAS / Major Incidents / INC0048102"},
     ),
     "RITM0094101": Ticket(
@@ -168,6 +181,7 @@ MOCK_DB: dict[str, Ticket] = {
         parent_incident="INC0048102", child_incidents=["INC0048103"], linked_change="CHG0092100",
         latest_work_notes="RCA points to an expired claim mapping included in the policy baseline.",
         closure_notes="Problem remains open until the change review confirms corrective controls.",
+        ptasks=[{"id": "PTASK001", "title": "Collect qRFC queue lock traces", "state": "Closed"}, {"id": "PTASK002", "title": "Validate middleware retry policy", "state": "Open"}, {"id": "PTASK003", "title": "Review preventive monitoring threshold", "state": "Pending"}],
         resources={"KBA": "KBA-ATLAS-1057 — Claim mapping diagnostics", "Veeva": "Veeva Vault / Quality / PRB0019201-RCA", "GDrive": "ATLAS / Problems / PRB0019201"},
     ),
     "CHG0092100": Ticket(
@@ -177,6 +191,7 @@ MOCK_DB: dict[str, Ticket] = {
         parent_incident="INC0048102", child_incidents=["INC0048103"], linked_problem="PRB0019201",
         latest_work_notes="CAB approved the low-risk configuration correction for the next release window.",
         closure_notes="Post-implementation validation will confirm authentication and token refresh recovery.",
+        ctasks=[{"id": "CTASK001", "title": "Pre-patch backup", "state": "Closed"}, {"id": "CTASK002", "title": "Deploy patch", "state": "Open"}, {"id": "CTASK003", "title": "Validate qRFC queue recovery", "state": "Pending"}],
         resources={"KBA": "KBA-ATLAS-1061 — Policy change validation", "Veeva": "Veeva Vault / Change Control / CHG0092100", "GDrive": "ATLAS / Changes / CHG0092100"},
     ),
     "INC0048104": Ticket(
@@ -211,15 +226,55 @@ MOCK_DB: dict[str, Ticket] = {
         closure_notes="Problem remains open until pool sizing and connection-leak remediation are validated.",
         resources={"KBA": "KBA-ORACLE-315 — Connection pool triage", "Veeva": "Veeva Vault / Database / PRB0019202", "GDrive": "ATLAS / Problems / PRB0019202"},
     ),
+    "INC0048110": Ticket(
+        id="INC0048110", type="INC", record_type="INC", title="SAP MM PO Workflow Stuck at Release Step",
+        description="Purchase orders in SAP MM remain stuck in the approval workflow and cannot be released to suppliers.", state="In Progress",
+        priority="P2", assignee="Nina Keller", assignment_group="SAP MM Support", sla_status="AT_RISK", sla_remaining_mins=95, sentiment="Impatient",
+        latest_work_notes="Workflow agent trace shows a missing substitution rule after the latest purchasing-org update.",
+        closure_notes="Close after test POs complete approval and the buyer confirms release processing.",
+        additional_comments=["Buyers report that high-priority PO approvals have been waiting longer than two hours.", "SAP MM support is comparing the affected purchasing organization to the working template."],
+        resources={"KBA": "KBA-SAP-MM-118 — PO workflow release diagnosis", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-workflow-SUD.pptx"},
+    ),
+    "INC0048111": Ticket(
+        id="INC0048111", type="INC", record_type="INC", title="SAP SD Billing Document Generation Failure",
+        description="SAP SD billing jobs fail to generate invoices for completed outbound deliveries.", state="In Progress",
+        priority="P1", assignee="Marco Silva", assignment_group="SAP SD Support", sla_status="BREACHED", sla_remaining_mins=20, sentiment="Frustrated",
+        latest_work_notes="The billing run fails after a pricing condition validation error in the affected sales organization.",
+        closure_notes="Close after a monitored billing rerun generates invoices and finance validates postings.",
+        additional_comments=["Finance has flagged the missing invoices as a month-end revenue-recognition risk.", "SAP SD support is isolating the pricing condition transport that introduced the validation failure."],
+        resources={"KBA": "KBA-SAP-SD-207 — Billing generation recovery", "Veeva": "Veeva Vault / Finance / SD-Billing-Control", "GDrive": "ATLAS / SAP KT Hub / SD / Billing-recovery-video"},
+    ),
+    "PRB0019203": Ticket(
+        id="PRB0019203", type="PRB", record_type="PRB", title="SAP PLM Recipe Sync Integration Failure",
+        description="Recipe master data updates from SAP PLM are not synchronizing to the downstream formulation service.", state="Root Cause Analysis",
+        priority="P1", assignee="Lea Fischer", assignment_group="SAP PLM Support", rca_phase="RCA In Progress", risk_level="High Impact",
+        latest_work_notes="Integration logs show a schema mismatch after the latest recipe attribute extension.",
+        closure_notes="Problem remains open until the corrected mapping passes recipe sync and audit checks.",
+        ptasks=[{"id": "PTASK101", "title": "Compare PLM recipe payload schemas", "state": "Closed"}, {"id": "PTASK102", "title": "Correct downstream attribute mapping", "state": "Open"}, {"id": "PTASK103", "title": "Execute regulated recipe sync validation", "state": "Pending"}],
+        resources={"KBA": "KBA-SAP-PLM-054 — Recipe synchronization triage", "Veeva": "Veeva Vault / QMS / PLM-Recipe-Integration-SOP", "GDrive": "ATLAS / SAP KT Hub / PLM / Recipe-sync-SUD.pdf"},
+    ),
+    "RITM0094110": Ticket(
+        id="RITM0094110", type="RITM", record_type="RITM", title="SAP Basis Batch Job SU53 Authorization Request",
+        description="Request to correct missing SU53 authorization for a controlled SAP Basis batch job.", state="Fulfillment",
+        priority="P2", assignee="Jonas Weber", assignment_group="SAP Basis Ops", sla_status="ON_TRACK", sla_remaining_mins=300, sentiment="Calm",
+        latest_work_notes="Requested authorization object was verified against the batch job role design and segregation-of-duties control.",
+        closure_notes="Close after the role transport is validated and the batch job completes without SU53 errors.",
+        additional_comments=["Job owner attached the SU53 trace from the failed overnight run.", "Basis and authorization teams confirmed the requested change requires controlled role approval."],
+        resources={"KBA": "KBA-SAP-BASIS-310 — SU53 batch-job authorization", "Veeva": "Veeva Vault / Access / SAP-Basis-Authorization-SOP", "GDrive": "ATLAS / SAP KT Hub / Basis / SU53-authorization-video"},
+    ),
 }
 
 
-def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, str]:
+def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, object]:
     ticket = MOCK_DB[ticket_id]
     snapshot = {
         "number": ticket.number,
         "title": ticket.title,
+        "type": ticket.type,
         "latest_note": ticket.work_notes[-1],
+        "additional_comments": ticket.additional_comments,
+        "ctasks": ticket.ctasks,
+        "ptasks": ticket.ptasks,
     }
     if include_close_notes:
         snapshot["close_notes"] = ticket.close_notes or "No closure notes recorded."
