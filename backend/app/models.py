@@ -69,7 +69,7 @@ class Ticket(BaseModel):
     linked_problem: str | None = None
     linked_change: str | None = None
     latest_work_notes: str
-    closure_notes: str
+    closure_notes: str = ""
     resources: dict[str, str]
     chg_phase: str | None = None
     prb_phase: str | None = None
@@ -337,6 +337,42 @@ MOCK_DB: dict[str, Ticket] = {
         closure_notes="Applied SAP Note 2839211 to fix release workflow config.", close_code="Solved (Permanently)",
         ptasks=[{"id": "PTASK8992", "title": "Validate SAP Note 2839211 implementation", "state": "Closed", "close_notes": "Release strategy validation completed successfully."}],
         resources={"KBA": "KBA-SAP-MM-094 — Release strategy configuration recovery", "Veeva": "Veeva Vault / Procurement / MM-Release-Strategy-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / Release-strategy-RCA.pptx"},
+    ),
+    "INC0048120": Ticket(
+        id="INC0048120", type="INC", record_type="INC", title="SolMan Alert: SM37 Batch Job Z_EWM_RECON_NIGHTLY failed with ABAP dump",
+        description="SolMan Technical Monitoring detected job Z_EWM_RECON_NIGHTLY canceled in client 100 with dump ITAB_ERROR_IN_INITIAL_SIZE.", state="In Progress",
+        priority="P1", assignee="Jonas Weber", assignment_group="SAP Basis Ops", sla_status="BREACHED", sla_remaining_mins=18, sentiment="Frustrated",
+        latest_work_notes="Basis on-call is reviewing SM37 spool and ST22 dump evidence for the nightly EWM reconciliation run.",
+        additional_comments=["SolMan monitoring raised a P1 alert after the nightly reconciliation job canceled.", "Warehouse reconciliation is delayed pending batch job recovery."],
+        similar_records=[{"id": "INC0048121", "score": 98, "title": "Duplicate: Nightly EWM reconciliation job cancellation alert", "state": "New", "resolution_date": "Current Triage Queue"}],
+        knowledge_refs=[{"source_type": "ServiceNow KBA", "title": "SolMan KBA — SM37 batch job dump recovery", "path_or_url": "https://servicenow.example.local/kb?id=solman-sm37-itab-error", "summary": "Guided SM37, ST22, and job-log triage for failed EWM batch runs."}, {"source_type": "Veeva Vault SOP", "title": "SAP Note 2491021 controlled implementation SOP", "path_or_url": "Veeva Vault / QMS / SAP Notes / 2491021.pdf", "summary": "Controlled review procedure for SAP Note 2491021 and related monitoring fixes."}, {"source_type": "Google Drive KT/SUD Hub", "title": "SolMan job monitoring KT video", "path_or_url": "Google Drive / ATLAS / KT Hub / SolMan / SM37-job-monitoring-video", "summary": "Recorded walkthrough for identifying redundant SolMan monitoring alerts."}],
+        resources={"KBA": "KBA-SOLMAN-212 — SM37 job cancellation", "Veeva": "Veeva Vault / QMS / SAP Note 2491021", "GDrive": "ATLAS / SolMan KT / SM37-monitoring-video"},
+    ),
+    "INC0048121": Ticket(
+        id="INC0048121", type="INC", record_type="INC", title="Duplicate SolMan Alert: Batch Job Z_EWM_RECON_NIGHTLY canceled",
+        description="Automated alert trigger for failed job Z_EWM_RECON_NIGHTLY.", state="New",
+        priority="P1", assignee="Triage Queue", assignment_group="Observability & Monitoring", sla_status="AT_RISK", sla_remaining_mins=45, sentiment="Impatient",
+        latest_work_notes="Alert correlation engine flagged this event as a likely duplicate of the SAP Basis incident.",
+        additional_comments=["Automated monitoring opened this alert from the same nightly EWM reconciliation job cancellation.", "Triage should link this duplicate to the active SAP Basis investigation."],
+        similar_records=[{"id": "INC0048120", "score": 98, "title": "SolMan Alert: SM37 Batch Job Z_EWM_RECON_NIGHTLY failed with ABAP dump", "state": "In Progress", "resolution_date": "Active Work Item"}],
+        resources={"KBA": "KBA-SOLMAN-212 — SM37 job cancellation", "Veeva": "Veeva Vault / QMS / SAP Note 2491021", "GDrive": "ATLAS / SolMan KT / Alert-correlation-SUD.pptx"},
+    ),
+    "PRB0019205": Ticket(
+        id="PRB0019205", type="PRB", record_type="PRB", title="SolMan ChaRM Transport Synchronization Failure during Cutover",
+        description="SolMan ChaRM release transport failed to sync with SAP PLM QA environment.", state="Root Cause Analysis",
+        priority="P2", assignee="Mira Desai", assignment_group="Workplace Technology", rca_phase="RCA In Progress", risk_level="High Impact",
+        latest_work_notes="ALM engineering is correlating ChaRM and STMS logs from the QA cutover window.",
+        ptasks=[{"id": "PTASK00101", "title": "Analyze SolMan transport log STMS", "state": "Closed", "close_notes": "Log confirmed target buffer deadlock in QA instance."}, {"id": "PTASK00102", "title": "Re-align ChaRM project landscape buffer", "state": "Work in Progress", "close_notes": None}],
+        resources={"KBA": "KBA-SOLMAN-310 — ChaRM transport synchronization", "Veeva": "Veeva Vault / QMS / ChaRM-Cutover-SOP", "GDrive": "ATLAS / SolMan KT / ChaRM-STMS-analysis-video"},
+    ),
+    "INC0048122": Ticket(
+        id="INC0048122", type="INC", record_type="INC", title="HP ALM to ServiceNow defect sync error for SAP SD release",
+        description="Automated API bridge failed to sync ALM Defect #4091 into ServiceNow Change CHG0092100.", state="In Progress",
+        priority="P3", assignee="Avery Brooks", assignment_group="Enterprise Integration Services", sla_status="AT_RISK", sla_remaining_mins=110, sentiment="Impatient",
+        latest_work_notes="Integration support is replaying the failed defect payload and validating the CHG0092100 mapping.",
+        additional_comments=["Release manager reported that ALM Defect #4091 is missing from the ServiceNow change record.", "Customer-visible update: API bridge replay is in progress."],
+        similar_records=[{"id": "PRB0019205", "score": 85, "title": "SolMan ChaRM Transport Synchronization Failure", "state": "Root Cause Analysis", "resolution_date": "Active PRB"}],
+        resources={"KBA": "KBA-ALM-4091 — HP ALM to ServiceNow sync", "Veeva": "Veeva Vault / QMS / ALM-ServiceNow-Bridge-SOP", "GDrive": "ATLAS / ALM KT / Defect-sync-replay-SUD.pdf"},
     ),
 }
 
