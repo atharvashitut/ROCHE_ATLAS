@@ -87,6 +87,7 @@ class Ticket(BaseModel):
     linked_chg: dict[str, object] | None = None
     knowledge_refs: list[dict[str, str]] = Field(default_factory=list)
     ai_resolution_guide: str = ""
+    similar_records: list[dict[str, object]] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def enrich_servicenow_fields(self) -> "Ticket":
@@ -288,6 +289,7 @@ MOCK_DB: dict[str, Ticket] = {
         child_incident_ids=["INC0048111"], latest_work_notes="Workflow agent trace shows a missing substitution rule after the latest purchasing-org update.",
         closure_notes="Close after test POs complete approval and the buyer confirms release processing.",
         additional_comments=["Buyers report that high-priority PO approvals have been waiting longer than two hours.", "SAP MM support is comparing the affected purchasing organization to the working template."],
+        similar_records=[{"id": "PRB0018992", "score": 95, "title": "Historical Root Cause: PO Release Strategy Config Corruption", "state": "Closed", "resolution_date": "Last Month"}],
         resources={"KBA": "KBA-SAP-MM-118 — PO workflow release diagnosis", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-workflow-SUD.pptx"},
     ),
     "INC0048111": Ticket(
@@ -326,6 +328,15 @@ MOCK_DB: dict[str, Ticket] = {
         additional_comments=["Job owner attached the SU53 trace from the failed overnight run.", "Basis and authorization teams confirmed the requested change requires controlled role approval."],
         sctasks=[{"id": "SCTASK001", "title": "Validate SU53 authorization trace", "state": "Closed Complete", "close_notes": "Role assignment validated against the approved trace."}],
         resources={"KBA": "KBA-SAP-BASIS-310 — SU53 batch-job authorization", "Veeva": "Veeva Vault / Access / SAP-Basis-Authorization-SOP", "GDrive": "ATLAS / SAP KT Hub / Basis / SU53-authorization-video"},
+    ),
+    "PRB0018992": Ticket(
+        id="PRB0018992", type="PRB", record_type="PRB", title="Historical Root Cause: PO Release Strategy Config Corruption",
+        description="Historical SAP MM problem in which a corrupted release strategy configuration blocked purchase order workflow approvals.", state="Closed",
+        priority="P1", assignee="Nina Keller", assignment_group="SAP MM Support", rca_phase="RCA", risk_level="High Impact",
+        latest_work_notes="Historical review confirmed release strategy configuration corruption in the purchasing organization.",
+        closure_notes="Applied SAP Note 2839211 to fix release workflow config.", close_code="Solved (Permanently)",
+        ptasks=[{"id": "PTASK8992", "title": "Validate SAP Note 2839211 implementation", "state": "Closed", "close_notes": "Release strategy validation completed successfully."}],
+        resources={"KBA": "KBA-SAP-MM-094 — Release strategy configuration recovery", "Veeva": "Veeva Vault / Procurement / MM-Release-Strategy-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / Release-strategy-RCA.pptx"},
     ),
 }
 

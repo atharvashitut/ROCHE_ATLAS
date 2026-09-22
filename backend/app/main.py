@@ -138,6 +138,8 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
     ticket = MOCK_DB.get(normalized_id) if normalized_id else None
     if action == "chat" and ticket:
         response = f"Here is the information for {ticket.id}: {response}"
+    if ticket and ticket.similar_records:
+        response = "⚠️ **AI Similarity Detection Triggered:** I found historical patterns matching this issue.\n\n" + response
     return {
         "response": response,
         "action": action,
