@@ -25,6 +25,18 @@ def ticket_payload(ticket: Ticket) -> dict:
     return {**ticket.model_dump(), "health_color": calculate_health_color(ticket)}
 
 
+def topology_payload(ticket: Ticket) -> dict[str, object]:
+    """Return the ServiceNow relationship graph needed by chat and ticket inspectors."""
+
+    return {
+        "parent_inc": ticket.parent_inc,
+        "current_ticket": {"number": ticket.number, "title": ticket.title, "type": ticket.type},
+        "child_incs": ticket.child_incs,
+        "linked_prb": ticket.linked_prb,
+        "linked_chg": ticket.linked_chg,
+    }
+
+
 def chat_response(query: ChatQuery) -> str:
     ticket = MOCK_DB.get(query.ticket_id) if query.ticket_id else None
     context = f" for {ticket.id}" if ticket else ""
@@ -37,10 +49,10 @@ def chat_response(query: ChatQuery) -> str:
     if ticket:
         context = f"{ticket.id} ({ticket.type}) is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}."
         if ticket.type in {"INC", "RITM"}:
-            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {ticket.sentiment}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
+            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {ticket.sentiment}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         if ticket.type == "PRB":
-            return f"{context} RCA phase is {ticket.rca_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
-        return f"{context} CAB status is {ticket.cab_status} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. {ticket.latest_work_notes}"
+            return f"{context} RCA phase is {ticket.prb_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
+        return f"{context} Change phase is {ticket.chg_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
     return "ATLAS Co-Pilot is using deterministic mock ticket data. Ask about a ticket ID, or select a ticket to generate a focused CR or RCA draft."
 
 
@@ -106,6 +118,9 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "ticket_id": normalized_id,
         "generated_content": response if action != "chat" else None,
         "ticket": ticket_payload(ticket) if ticket else None,
+        "ai_resolution_guide": ticket.ai_resolution_guide if ticket else None,
+        "knowledge_refs": ticket.knowledge_refs if ticket else [],
+        "topology": topology_payload(ticket) if ticket else None,
     }
 
 

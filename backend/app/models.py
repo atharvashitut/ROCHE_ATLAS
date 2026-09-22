@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 HealthColor = Literal["RED", "YELLOW", "GREEN"]
 TicketType = Literal["INC", "RITM", "PRB", "CHG"]
@@ -40,6 +40,8 @@ class Ticket(BaseModel):
     """A common ticket shape with metrics applicable to its ServiceNow type."""
 
     id: str
+    sys_id: str = ""
+    number: str = ""
     type: TicketType
     # Kept during the UI transition so existing ticket detail rendering remains compatible.
     record_type: TicketType
@@ -62,6 +64,60 @@ class Ticket(BaseModel):
     latest_work_notes: str
     closure_notes: str
     resources: dict[str, str]
+    chg_phase: str | None = None
+    prb_phase: str | None = None
+    work_notes: list[str] = Field(default_factory=list)
+    close_notes: str | None = None
+    parent_inc: dict[str, str] | None = None
+    child_incs: list[dict[str, str]] = Field(default_factory=list)
+    linked_prb: dict[str, str] | None = None
+    linked_chg: dict[str, str] | None = None
+    knowledge_refs: list[dict[str, str]] = Field(default_factory=list)
+    ai_resolution_guide: str = ""
+
+    @model_validator(mode="after")
+    def enrich_servicenow_fields(self) -> "Ticket":
+        """Populate consistent ServiceNow-native demo data from legacy-compatible fields."""
+
+        self.sys_id = self.sys_id or f"mock-{self.id.lower()}-a71c"
+        self.number = self.number or self.id
+        self.work_notes = self.work_notes or [self.latest_work_notes]
+        self.close_notes = self.close_notes or self.closure_notes
+        if self.type == "PRB":
+            self.prb_phase = self.prb_phase or ("RCA" if self.rca_phase else "Assess")
+        if self.type == "CHG":
+            self.chg_phase = self.chg_phase or ("Schedule" if self.state == "Scheduled" else "Assess")
+        self.knowledge_refs = self.knowledge_refs or _knowledge_references(self.number, self.title)
+        self.ai_resolution_guide = self.ai_resolution_guide or (
+            f"Confirm the reported impact, execute the approved remediation for {self.title}, "
+            "validate service recovery with the requester, and document the evidence in work notes."
+        )
+        return self
+
+
+def _knowledge_references(number: str, title: str) -> list[dict[str, str]]:
+    """Return three traceable knowledge sources for a mock enterprise record."""
+
+    return [
+        {
+            "source_type": "ServiceNow KBA",
+            "title": f"KBA — {title} recovery procedure",
+            "path_or_url": f"https://servicenow.example.local/kb?id={number.lower()}-recovery",
+            "summary": "Step-by-step validation and recovery checks for the reported service impact.",
+        },
+        {
+            "source_type": "Veeva Vault SOP",
+            "title": f"SOP — Controlled remediation for {number}",
+            "path_or_url": f"Veeva Vault / QMS / SOPs / {number}-controlled-remediation.pdf",
+            "summary": "Approved quality and compliance controls to apply while resolving this work item.",
+        },
+        {
+            "source_type": "Google Drive KT/SUD Hub",
+            "title": f"{number} KT Video Recording and SUD walkthrough PPT",
+            "path_or_url": f"Google Drive / ATLAS / KT Hub / {number} / SUD-walkthrough.pptx | KT-video-recording",
+            "summary": "Operational context, handover steps, and a recorded walkthrough for first-line resolution.",
+        },
+    ]
 
 
 def calculate_health_color(ticket: Ticket) -> HealthColor:
@@ -156,3 +212,39 @@ MOCK_DB: dict[str, Ticket] = {
         resources={"KBA": "KBA-ORACLE-315 — Connection pool triage", "Veeva": "Veeva Vault / Database / PRB0019202", "GDrive": "ATLAS / Problems / PRB0019202"},
     ),
 }
+
+
+def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, str]:
+    ticket = MOCK_DB[ticket_id]
+    snapshot = {
+        "number": ticket.number,
+        "title": ticket.title,
+        "latest_note": ticket.work_notes[-1],
+    }
+    if include_close_notes:
+        snapshot["close_notes"] = ticket.close_notes or "No closure notes recorded."
+    if ticket.type == "PRB":
+        snapshot["prb_phase"] = ticket.prb_phase or "New"
+    if ticket.type == "CHG":
+        snapshot["chg_phase"] = ticket.chg_phase or "New"
+    return snapshot
+
+
+def _enrich_relationship_topology() -> None:
+    """Normalize legacy ID links into chat-ready ServiceNow relationship objects."""
+
+    for ticket in MOCK_DB.values():
+        if ticket.parent_incident and ticket.parent_incident in MOCK_DB:
+            ticket.parent_inc = _relationship_snapshot(ticket.parent_incident)
+        ticket.child_incs = [
+            _relationship_snapshot(child_id, include_close_notes=True)
+            for child_id in ticket.child_incidents
+            if child_id in MOCK_DB
+        ]
+        if ticket.linked_problem and ticket.linked_problem in MOCK_DB:
+            ticket.linked_prb = _relationship_snapshot(ticket.linked_problem)
+        if ticket.linked_change and ticket.linked_change in MOCK_DB:
+            ticket.linked_chg = _relationship_snapshot(ticket.linked_change)
+
+
+_enrich_relationship_topology()
