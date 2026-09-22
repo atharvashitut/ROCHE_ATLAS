@@ -34,7 +34,7 @@ def chat_response(query: ChatQuery) -> str:
         title = ticket.title if ticket else "the reported service issue"
         return f"RCA draft{context}: The observed impact is {title}. The mock evidence points to a policy claim mapping regression. Correct the mapping, validate token refresh, and add a pre-release claim validation control."
     if ticket:
-        return f"{ticket.id} is {ticket.state}, assigned to {ticket.assignee}. Health is {calculate_health_color(ticket)} because SLA is {ticket.sla_status} and sentiment is {ticket.sentiment}. {ticket.latest_work_notes}"
+        return f"{ticket.id} is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}. Health is {calculate_health_color(ticket)} because SLA is {ticket.sla_status} ({ticket.sla_minutes} minutes) and sentiment is {ticket.sentiment}. {ticket.latest_work_notes}"
     return "ATLAS Co-Pilot is using deterministic mock ticket data. Ask about a ticket ID, or select a ticket to generate a focused CR or RCA draft."
 
 
@@ -42,10 +42,12 @@ app = FastAPI(title="Roche ATLAS ITSM Co-Pilot", version="1.0.0")
 
 
 @app.get("/api/dashboard/tickets")
-def list_dashboard_tickets(assignee: str | None = None) -> dict[str, list[dict]]:
+def list_dashboard_tickets(assignee: str | None = None, assignment_group: str | None = None) -> dict[str, list[dict]]:
     tickets = list(MOCK_DB.values())
     if assignee:
         tickets = [ticket for ticket in tickets if ticket.assignee == assignee]
+    if assignment_group:
+        tickets = [ticket for ticket in tickets if ticket.assignment_group == assignment_group]
     return {"tickets": [ticket_payload(ticket) for ticket in tickets]}
 
 
