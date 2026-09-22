@@ -27,6 +27,10 @@ function ContextMetrics({ ticket }) {
   return <div className="space-y-1 text-xs text-slate-300"><p><span className="text-slate-500">CAB status:</span> {ticket.cab_status}</p><p><span className="text-slate-500">Risk:</span> {ticket.risk_level}</p></div>
 }
 
+function hasDetailFields(ticket) {
+  return Boolean(ticket && Array.isArray(ticket.comments) && Array.isArray(ticket.work_notes) && Array.isArray(ticket.knowledge_refs) && Array.isArray(ticket.historical_tickets))
+}
+
 export default function Dashboard() {
   const [tickets, setTickets] = useState([])
   const [assignmentGroups, setAssignmentGroups] = useState([])
@@ -89,6 +93,16 @@ export default function Dashboard() {
 
   async function openTicket(ticketId) {
     setDetailError('')
+    const cachedTicket = tickets.find((ticket) => ticket.id === ticketId || ticket.number === ticketId || ticket.sys_id === ticketId)
+    if (cachedTicket) {
+      setSelected(cachedTicket)
+      if (hasDetailFields(cachedTicket)) return
+      try {
+        const result = await fetchTicket(ticketId)
+        setSelected((current) => current?.number === cachedTicket.number ? result.ticket : current)
+      } catch (requestError) { setDetailError(requestError.message) }
+      return
+    }
     setSelected({ loading: true })
     try { const result = await fetchTicket(ticketId); setSelected(result.ticket) }
     catch (requestError) { setDetailError(requestError.message); setSelected(null) }
