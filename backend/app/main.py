@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException
@@ -75,15 +76,35 @@ def get_ticket(ticket_id: str) -> dict[str, dict]:
 def query_chat(query: ChatQuery) -> dict[str, object]:
     if query.ticket_id and query.ticket_id.upper() not in MOCK_DB:
         raise HTTPException(status_code=404, detail=f"Ticket {query.ticket_id} was not found")
-    normalized_id = query.ticket_id.upper() if query.ticket_id else None
-    normalized_query = query.model_copy(update={"ticket_id": normalized_id})
+
+    query_text = query.message.upper()
+    found_id = query.ticket_id.upper() if query.ticket_id else next(
+        (ticket_id for ticket_id in MOCK_DB if ticket_id in query_text),
+        None,
+    )
+    rca_intent = "RCA" in query_text or "ROOT CAUSE" in query_text
+    cr_intent = bool(re.search(r"\bCR\b", query_text)) or "CHANGE" in query_text
+
+    if query.action == "generate_rca" or rca_intent:
+        action = "generate_rca"
+        normalized_id = "PRB0019201"
+    elif query.action == "generate_cr" or cr_intent:
+        action = "generate_cr"
+        normalized_id = "CHG0092100"
+    else:
+        action = "chat"
+        normalized_id = found_id
+
+    normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
     response = chat_response(normalized_query)
     ticket = MOCK_DB.get(normalized_id) if normalized_id else None
+    if action == "chat" and ticket:
+        response = f"Here is the information for {ticket.id}: {response}"
     return {
         "response": response,
-        "action": normalized_query.action,
+        "action": action,
         "ticket_id": normalized_id,
-        "generated_content": response if normalized_query.action != "chat" else None,
+        "generated_content": response if action != "chat" else None,
         "ticket": ticket_payload(ticket) if ticket else None,
     }
 
