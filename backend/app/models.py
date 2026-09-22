@@ -12,6 +12,30 @@ SlaStatus = Literal["BREACHED", "AT_RISK", "ON_TRACK"]
 Sentiment = Literal["Frustrated", "Impatient", "Calm"]
 
 
+ALL_ASSIGNMENT_GROUPS = [
+    "SAP EWM Support",
+    "Integration Middleware",
+    "QMS Compliance Ops",
+    "SAP Basis Ops",
+    "Veeva Vault Admin",
+    "AWS Cloud Infrastructure",
+    "Oracle DB Services",
+    "Workplace Technology",
+    "Network Operations Center",
+    "Cybersecurity Operations",
+    "Identity & Access Management",
+    "Service Desk L2",
+    "Data Platform Engineering",
+    "Salesforce Platform Support",
+    "Microsoft 365 Collaboration",
+    "Linux Server Operations",
+    "Windows Server Operations",
+    "Observability & Monitoring",
+    "End User Compute",
+    "Enterprise Integration Services",
+]
+
+
 class Ticket(BaseModel):
     """A common ticket shape with metrics applicable to its ServiceNow type."""
 
@@ -98,5 +122,37 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="CAB approved the low-risk configuration correction for the next release window.",
         closure_notes="Post-implementation validation will confirm authentication and token refresh recovery.",
         resources={"KBA": "KBA-ATLAS-1061 — Policy change validation", "Veeva": "Veeva Vault / Change Control / CHG0092100", "GDrive": "ATLAS / Changes / CHG0092100"},
+    ),
+    "INC0048104": Ticket(
+        id="INC0048104", type="INC", record_type="INC", title="SAP EWM batch job authorization failure",
+        description="Nightly EWM reconciliation batch cannot access the production job client.", state="In Progress",
+        priority="P2", assignee="Jonas Weber", assignment_group="SAP Basis Ops", sla_status="AT_RISK", sla_remaining_mins=70, sentiment="Impatient",
+        latest_work_notes="Basis team is validating the affected technical user authorization profile.",
+        closure_notes="Close after the scheduled batch completes successfully and finance validates output.",
+        resources={"KBA": "KBA-SAP-2024 — Batch authorization diagnostics", "Veeva": "Veeva Vault / SAP / Batch-Access", "GDrive": "ATLAS / Incidents / INC0048104"},
+    ),
+    "RITM0094102": Ticket(
+        id="RITM0094102", type="RITM", record_type="RITM", title="Provision Veeva Vault quality reviewer role",
+        description="Approved request to grant Quality Reviewer access to a Veeva Vault workspace.", state="Fulfillment",
+        priority="P3", assignee="Sofia Moretti", assignment_group="Veeva Vault Admin", sla_status="ON_TRACK", sla_remaining_mins=540, sentiment="Calm",
+        latest_work_notes="Requester approval and training evidence were verified; access is queued for the next fulfillment cycle.",
+        closure_notes="Close after access confirmation and audit trail verification.",
+        resources={"KBA": "KBA-VEEVA-081 — Quality reviewer fulfillment", "Veeva": "Veeva Vault / Access / RITM0094102", "GDrive": "ATLAS / Service Requests / RITM0094102"},
+    ),
+    "INC0048105": Ticket(
+        id="INC0048105", type="INC", record_type="INC", title="AWS data ingestion worker capacity alarm",
+        description="Data ingestion workers are saturated and delaying regulated reporting feeds.", state="In Progress",
+        priority="P1", assignee="Avery Brooks", assignment_group="AWS Cloud Infrastructure", sla_status="BREACHED", sla_remaining_mins=25, sentiment="Frustrated",
+        latest_work_notes="On-call engineers are increasing worker capacity while investigating the traffic anomaly.",
+        closure_notes="Close after sustained queue recovery and reporting-feed validation.",
+        resources={"KBA": "KBA-AWS-211 — Worker capacity response", "Veeva": "Veeva Vault / Cloud / Ingestion-Capacity", "GDrive": "ATLAS / Incidents / INC0048105"},
+    ),
+    "PRB0019202": Ticket(
+        id="PRB0019202", type="PRB", record_type="PRB", title="Oracle database connection pool exhaustion",
+        description="Problem investigation into intermittent connection exhaustion across reporting services.", state="Root Cause Analysis",
+        priority="P1", assignee="Ravi Patel", assignment_group="Oracle DB Services", rca_phase="Evidence Collection", risk_level="High Impact",
+        latest_work_notes="Database services is correlating pool exhaustion with the month-end reporting workload.",
+        closure_notes="Problem remains open until pool sizing and connection-leak remediation are validated.",
+        resources={"KBA": "KBA-ORACLE-315 — Connection pool triage", "Veeva": "Veeva Vault / Database / PRB0019202", "GDrive": "ATLAS / Problems / PRB0019202"},
     ),
 }

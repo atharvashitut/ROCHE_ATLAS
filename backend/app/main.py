@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .models import MOCK_DB, Ticket, calculate_health_color
+from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color
 
 
 class ChatQuery(BaseModel):
@@ -54,6 +54,13 @@ def list_dashboard_tickets(assignee: str | None = None, assignment_group: str | 
     if assignment_group:
         tickets = [ticket for ticket in tickets if ticket.assignment_group == assignment_group]
     return {"tickets": [ticket_payload(ticket) for ticket in tickets]}
+
+
+@app.get("/api/dashboard/assignment-groups")
+def list_assignment_groups() -> dict[str, list[str]]:
+    """Return the enterprise assignment-group catalog used by queue filters."""
+
+    return {"assignment_groups": ALL_ASSIGNMENT_GROUPS}
 
 
 @app.get("/api/tickets/{ticket_id}")

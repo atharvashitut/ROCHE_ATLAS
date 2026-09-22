@@ -17,6 +17,10 @@ export async function fetchDashboardTickets(assignee) {
   return request(`/dashboard/tickets${params}`)
 }
 
+export async function fetchAssignmentGroups() {
+  return request('/dashboard/assignment-groups')
+}
+
 export async function fetchTicket(ticketId) {
   return request(`/tickets/${encodeURIComponent(ticketId)}`)
 }
