@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color
-from .rag_engine import query_gemini_rag
+from .rag_engine import query_chatgpt_rag
 
 
 class ChatQuery(BaseModel):
@@ -198,7 +198,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         normalized_id = found_id
 
     normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
-    rag_result = query_gemini_rag(query.message)
+    rag_result = query_chatgpt_rag(query.message)
     response = chat_response(normalized_query)
     ticket = MOCK_DB.get(normalized_id) if normalized_id else None
     if action == "chat":

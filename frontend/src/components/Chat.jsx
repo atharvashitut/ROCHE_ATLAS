@@ -15,6 +15,8 @@ const sourceStyleBySystem = {
   'Veeva Vault': { badge: '🟣 Veeva Vault QMS', className: 'bg-purple-950/60 text-purple-300 border-purple-500/40' },
   'HP ALM': { badge: '🔴 HP ALM Defect', className: 'bg-rose-950/60 text-rose-300 border-rose-500/40' },
   'Google Drive': { badge: '🔵 Google Drive KT', className: 'bg-sky-950/60 text-sky-300 border-sky-500/40' },
+  'ChatGPT Grounded': { badge: '🤖 ChatGPT Grounded', className: 'bg-slate-800 text-slate-200 border-slate-500/50' },
+  'ServiceNow Ticket': { badge: '🧾 Active ServiceNow Record', className: 'bg-cyan-950/60 text-cyan-300 border-cyan-500/40' },
 }
 
 function ReferencedSources({ sources = [] }) {
