@@ -269,6 +269,38 @@ def calculate_health_color(ticket: Ticket) -> HealthColor:
     return "GREEN"
 
 
+def _journal_thread(
+    ticket_id: str,
+    *,
+    requester: str,
+    l1_support: str,
+    l2_support: str,
+    initial_report: str,
+    monitoring_check: str,
+    business_impact: str,
+    diagnostic_update: str,
+) -> list[dict[str, str | bool]]:
+    """Create a sequential customer/L1/L2 ServiceNow additional-comments stream."""
+
+    entries = [
+        ("08:30:00", requester, True, initial_report),
+        ("08:50:00", l1_support, False, f"Initial triage is complete. {monitoring_check}"),
+        ("09:25:00", requester, True, f"Business impact update: {business_impact} Please confirm the expected next step and timing."),
+        ("10:10:00", l2_support, False, f"L2 diagnostic update: {diagnostic_update} We will post the next update after validation."),
+    ]
+    return [
+        {
+            "sys_id": hashlib.md5(f"{ticket_id}-comments-{index}".encode()).hexdigest(),
+            "element": "comments",
+            "sys_created_by": author,
+            "sys_created_on": f"2026-09-23 {created_at}",
+            "value": value,
+            "is_customer": is_customer,
+        }
+        for index, (created_at, author, is_customer, value) in enumerate(entries, start=1)
+    ]
+
+
 MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
@@ -293,6 +325,7 @@ MOCK_DB: dict[str, Ticket] = {
         priority="P3", assignee="Priya Nair", assignment_group="SAP EWM Support", sla_status="ON_TRACK", sla_remaining_mins=360, sentiment="Calm",
         latest_work_notes="Role request validated against the approved sandbox access matrix and queued for provisioning.",
         closure_notes="Close after role assignment and requester confirmation.",
+        comments=_journal_thread("RITM0094101", requester="Daniel Ruiz", l1_support="Alex Rivera", l2_support="Priya Nair", initial_report="I need SAP EWM 1010 sandbox roles for the warehouse test cycle beginning tomorrow.", monitoring_check="L1 verified the request approval, training evidence, and sandbox access matrix in ServiceNow.", business_impact="The project team cannot complete integration testing until the role assignment is available.", diagnostic_update="The approved roles are queued in the SAP access provisioning batch and the role matrix is being rechecked."),
         resources={"KBA": "KBA-EWM-1010 — Sandbox role provisioning", "Veeva": "Veeva Vault / Access / EWM-1010-Roles", "GDrive": "ATLAS / Service Requests / RITM0094101"},
     ),
     "INC0048103": Ticket(
@@ -302,6 +335,7 @@ MOCK_DB: dict[str, Ticket] = {
         parent_incident={"sys_id": "sys_inc_1", "number": "INC0048102", "short_description": "SAP EWM qRFC Queue Lock", "state": "In Progress"}, linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="Reproduced with the affected policy group and attached traces to the problem record.",
         closure_notes="Close after the corrective change has been verified in production.",
+        comments=_journal_thread("INC0048103", requester="Elena Martins", l1_support="Alex Rivera", l2_support="Maya Chen", initial_report="Operations users cannot refresh their token after the warehouse sign-in screen times out.", monitoring_check="SolMan and identity monitoring show repeated refresh failures for the affected operations policy group.", business_impact="The morning shift is using manual workarounds and cannot complete normal scanner transactions.", diagnostic_update="The issue was reproduced with the affected policy group and traces were attached to the linked problem record."),
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / Token-Refresh-Validation", "GDrive": "ATLAS / Major Incidents / INC0048103"},
     ),
     "INC0048109": Ticket(
@@ -312,6 +346,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Warehouse operations supplied failed goods-issue timestamps for correlation with the qRFC queue backlog.",
         additional_comments=["Operators cannot confirm goods issue from affected scanner queues.", "Customer-visible update: SAP EWM support is correlating the scanner failures with the active qRFC recovery."],
         historical_tickets=[{"id": "INC0038810", "title": "Warehouse scanner posting delay", "resolution_date": "8 months ago", "close_notes_snippet": "Cleared the blocked qRFC queue after validating the warehouse replication worker.", "relevance_score": 76}],
+        comments=_journal_thread("INC0048109", requester="Luca Bianchi", l1_support="Alex Rivera", l2_support="Maya Chen", initial_report="Warehouse scanners cannot post goods issue for the outbound queues.", monitoring_check="L1 correlated the scanner failures with the open SAP EWM qRFC backlog in SolMan.", business_impact="Outbound loading is accumulating and the shift supervisor needs a recovery estimate before the next carrier window.", diagnostic_update="SAP EWM L2 is correlating failed posting timestamps with the locked qRFC owner and memory-pressure alerts."),
         resources={"KBA": "KBA-SAP-EWM-1062 — Scanner goods issue queue recovery", "Veeva": "Veeva Vault / Warehouse / EWM-Scanner-Recovery-SOP", "GDrive": "ATLAS / SAP KT Hub / EWM / Scanner-goods-issue-recovery-video"},
     ),
     "PRB0019201": Ticket(
@@ -341,6 +376,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Basis team is validating the affected technical user authorization profile.",
         closure_notes="Close after the scheduled batch completes successfully and finance validates output.",
         historical_tickets=[{"id": "INC0031099", "title": "Batch user background auth failure", "resolution_date": "6 months ago", "close_notes_snippet": "Assigned SAP_ALL temporarily to batch user ALEREMOTE; permanently fixed via SU53 role adjustment.", "relevance_score": 85}, {"id": "RITM0088102", "title": "Missing background execution role", "resolution_date": "1 year ago", "close_notes_snippet": "Granted Z_BATCH_EXECUTION role to technical user.", "relevance_score": 78}],
+        comments=_journal_thread("INC0048104", requester="Helen Foster", l1_support="Service Desk L1", l2_support="Jonas Weber", initial_report="The nightly EWM reconciliation batch fails with an authorization error in the production job client.", monitoring_check="L1 reviewed SM37 and the job-monitoring alert, then attached the available SU53 evidence.", business_impact="Finance reconciliation is delayed and the warehouse cannot complete the planned morning variance review.", diagnostic_update="SAP Basis is validating the technical-user authorization profile and segregation-of-duties controls."),
         resources={"KBA": "KBA-SAP-2024 — Batch authorization diagnostics", "Veeva": "Veeva Vault / SAP / Batch-Access", "GDrive": "ATLAS / Incidents / INC0048104"},
     ),
     "RITM0094102": Ticket(
@@ -349,6 +385,7 @@ MOCK_DB: dict[str, Ticket] = {
         priority="P3", assignee="Sofia Moretti", assignment_group="Veeva Vault Admin", sla_status="ON_TRACK", sla_remaining_mins=540, sentiment="Calm",
         latest_work_notes="Requester approval and training evidence were verified; access is queued for the next fulfillment cycle.",
         closure_notes="Close after access confirmation and audit trail verification.",
+        comments=_journal_thread("RITM0094102", requester="Amira Khan", l1_support="Service Desk L1", l2_support="Sofia Moretti", initial_report="Please provision the approved Quality Reviewer role in Veeva Vault for the upcoming document review cycle.", monitoring_check="L1 confirmed manager approval, required training, and the requester's active Vault account.", business_impact="The reviewer cannot complete the controlled SOP review before the scheduled quality gate.", diagnostic_update="Veeva administration verified the role mapping and queued it for the next controlled fulfillment cycle."),
         resources={"KBA": "KBA-VEEVA-081 — Quality reviewer fulfillment", "Veeva": "Veeva Vault / Access / RITM0094102", "GDrive": "ATLAS / Service Requests / RITM0094102"},
     ),
     "INC0048105": Ticket(
@@ -357,6 +394,7 @@ MOCK_DB: dict[str, Ticket] = {
         priority="P1", assignee="Avery Brooks", assignment_group="AWS Cloud Infrastructure", sla_status="BREACHED", sla_remaining_mins=25, sentiment="Frustrated",
         latest_work_notes="On-call engineers are increasing worker capacity while investigating the traffic anomaly.",
         closure_notes="Close after sustained queue recovery and reporting-feed validation.",
+        comments=_journal_thread("INC0048105", requester="Regulatory Reporting Team", l1_support="Cloud Operations L1", l2_support="Avery Brooks", initial_report="The regulated reporting feed is delayed because AWS ingestion workers are saturated.", monitoring_check="Cloud monitoring confirmed queue depth growth and worker-capacity alarms across the ingestion tier.", business_impact="The reporting team may miss the regulated submission preparation window if the backlog is not reduced.", diagnostic_update="Cloud infrastructure is scaling the worker pool while isolating the traffic anomaly and validating downstream throughput."),
         resources={"KBA": "KBA-AWS-211 — Worker capacity response", "Veeva": "Veeva Vault / Cloud / Ingestion-Capacity", "GDrive": "ATLAS / Incidents / INC0048105"},
     ),
     "PRB0019202": Ticket(
@@ -377,6 +415,7 @@ MOCK_DB: dict[str, Ticket] = {
         additional_comments=["Buyers report that high-priority PO approvals have been waiting longer than two hours.", "SAP MM support is comparing the affected purchasing organization to the working template."],
         similar_records=[{"id": "PRB0018992", "score": 95, "title": "Historical Root Cause: PO Release Strategy Config Corruption", "state": "Closed", "resolution_date": "Last Month"}],
         historical_tickets=[{"id": "INC0042911", "title": "PO Release Strategy sync failure", "resolution_date": "3 months ago", "close_notes_snippet": "Restarted the PO release workflow in SWPR. Users were able to approve immediately after.", "relevance_score": 82}],
+        comments=_journal_thread("INC0048110", requester="Mark Vance", l1_support="Procurement Service Desk", l2_support="Nina Keller", initial_report="Purchase orders are stuck in the SAP MM approval workflow and cannot be released to suppliers.", monitoring_check="L1 reviewed workflow logs and found the affected purchasing organization differs from the working template.", business_impact="Urgent purchase orders are waiting for approval and buyers are escalating before the supplier cut-off.", diagnostic_update="SAP MM L2 isolated a missing substitution rule and is awaiting the controlled change needed for the purchasing-organization configuration."),
         resources={"KBA": "KBA-SAP-MM-118 — PO workflow release diagnosis", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-workflow-SUD.pptx"},
     ),
     "INC0048111": Ticket(
@@ -386,6 +425,7 @@ MOCK_DB: dict[str, Ticket] = {
         parent_incident_id="INC0048110", latest_work_notes="Approval exception has been isolated to the purchasing-group substitution configuration.",
         closure_notes="Close after the substitution rule is restored and PO approval completes.",
         additional_comments=["Buyer supplied a failing PO example and approval timestamp.", "Customer-visible update: the purchasing group exception is under active correction."],
+        comments=_journal_thread("INC0048111", requester="Mark Vance", l1_support="Procurement Service Desk", l2_support="Nina Keller", initial_report="A purchasing-group approval substitution is not being applied to the submitted PO.", monitoring_check="L1 verified the failing PO and timestamp against the parent SAP MM workflow incident.", business_impact="The buyer cannot approve the order and needs the exception corrected before today's purchasing run.", diagnostic_update="SAP MM L2 confirmed the child exception is tied to the missing purchasing-group substitution configuration."),
         resources={"KBA": "KBA-SAP-MM-119 — PO approval child exception", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-approval-child-SUD.pdf"},
     ),
     "INC0048112": Ticket(
@@ -395,6 +435,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Corrected the pricing condition mapping and completed a monitored billing IDoc reprocess.",
         closure_notes="Billing IDocs were reprocessed successfully and finance confirmed invoice postings.", close_code="Solved (Permanently)",
         additional_comments=["Finance was notified that the billing document reprocess completed successfully.", "Customer-visible update: delayed invoices are now available for posting."],
+        comments=_journal_thread("INC0048112", requester="Finance Operations", l1_support="Finance Service Desk", l2_support="Marco Silva", initial_report="Billing document IDocs failed and completed deliveries are not generating invoices.", monitoring_check="L1 checked the IDoc monitor and confirmed the failure is limited to the affected pricing-condition mapping.", business_impact="Finance cannot post the delayed invoices until the failed IDocs are recovered.", diagnostic_update="SAP SD corrected the mapping and completed a monitored IDoc reprocess; finance validation is in progress."),
         resources={"KBA": "KBA-SAP-SD-207 — Billing IDoc recovery", "Veeva": "Veeva Vault / Finance / SD-Billing-Control", "GDrive": "ATLAS / SAP KT Hub / SD / Billing-IDoc-recovery-video"},
     ),
     "PRB0019203": Ticket(
@@ -413,6 +454,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Requested authorization object was verified against the batch job role design and segregation-of-duties control.",
         closure_notes="Role transport was validated and the batch job completed without SU53 errors.", close_code="Successful",
         additional_comments=["Job owner attached the SU53 trace from the failed overnight run.", "Basis and authorization teams confirmed the requested change requires controlled role approval."],
+        comments=_journal_thread("RITM0094103", requester="Nora Patel", l1_support="Service Desk L1", l2_support="Jonas Weber", initial_report="Please grant the approved SAP Basis role required to resolve the SU53 error on the overnight batch job.", monitoring_check="L1 reviewed the submitted SU53 trace, approval evidence, and affected job details.", business_impact="The batch owner cannot complete the next controlled processing run without the authorization correction.", diagnostic_update="Basis and authorization teams validated the role transport and requested a final batch-job confirmation from the requester."),
         sctasks=[{"id": "SCTASK001", "title": "Validate SU53 authorization trace", "state": "Closed Complete", "close_notes": "Role assignment validated against the approved trace."}],
         resources={"KBA": "KBA-SAP-BASIS-310 — SU53 batch-job authorization", "Veeva": "Veeva Vault / Access / SAP-Basis-Authorization-SOP", "GDrive": "ATLAS / SAP KT Hub / Basis / SU53-authorization-video"},
     ),
@@ -433,6 +475,7 @@ MOCK_DB: dict[str, Ticket] = {
         additional_comments=["SolMan monitoring raised a P1 alert after the nightly reconciliation job canceled.", "Warehouse reconciliation is delayed pending batch job recovery."],
         similar_records=[{"id": "INC0048121", "score": 98, "title": "Duplicate: Nightly EWM reconciliation job cancellation alert", "state": "New", "resolution_date": "Current Triage Queue"}],
         knowledge_refs=[{"source_type": "ServiceNow KBA", "title": "SolMan KBA — SM37 batch job dump recovery", "path_or_url": "https://servicenow.example.local/kb?id=solman-sm37-itab-error", "summary": "Guided SM37, ST22, and job-log triage for failed EWM batch runs."}, {"source_type": "Veeva Vault SOP", "title": "SAP Note 2491021 controlled implementation SOP", "path_or_url": "Veeva Vault / QMS / SAP Notes / 2491021.pdf", "summary": "Controlled review procedure for SAP Note 2491021 and related monitoring fixes."}, {"source_type": "Google Drive KT/SUD Hub", "title": "SolMan job monitoring KT video", "path_or_url": "Google Drive / ATLAS / KT Hub / SolMan / SM37-job-monitoring-video", "summary": "Recorded walkthrough for identifying redundant SolMan monitoring alerts."}],
+        comments=_journal_thread("INC0048120", requester="Warehouse Operations", l1_support="Monitoring Service Desk", l2_support="Jonas Weber", initial_report="SolMan alerted that Z_EWM_RECON_NIGHTLY failed with an ABAP dump in client 100.", monitoring_check="L1 reviewed the SM37 status, ST22 notification, and the correlated SolMan monitoring event.", business_impact="Warehouse reconciliation is delayed and operations need to know whether the nightly result can be recovered before shift handover.", diagnostic_update="SAP Basis is reviewing spool and dump evidence while the external support vendor confirms the recommended remediation path."),
         resources={"KBA": "KBA-SOLMAN-212 — SM37 job cancellation", "Veeva": "Veeva Vault / QMS / SAP Note 2491021", "GDrive": "ATLAS / SolMan KT / SM37-monitoring-video"},
     ),
     "INC0048121": Ticket(
@@ -442,6 +485,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Alert correlation engine flagged this event as a likely duplicate of the SAP Basis incident.",
         additional_comments=["Automated monitoring opened this alert from the same nightly EWM reconciliation job cancellation.", "Triage should link this duplicate to the active SAP Basis investigation."],
         similar_records=[{"id": "INC0048120", "score": 98, "title": "SolMan Alert: SM37 Batch Job Z_EWM_RECON_NIGHTLY failed with ABAP dump", "state": "In Progress", "resolution_date": "Active Work Item"}],
+        comments=_journal_thread("INC0048121", requester="Monitoring Automation", l1_support="Monitoring Service Desk", l2_support="Triage Queue", initial_report="Automated monitoring created a second alert for the canceled Z_EWM_RECON_NIGHTLY batch job.", monitoring_check="L1 compared the event key, timestamps, and job name with the open SAP Basis incident.", business_impact="Duplicate paging is distracting the on-call team while the primary batch-job recovery is underway.", diagnostic_update="The triage queue confirmed a high-confidence duplicate match and is preparing the incident linkage to the primary investigation."),
         resources={"KBA": "KBA-SOLMAN-212 — SM37 job cancellation", "Veeva": "Veeva Vault / QMS / SAP Note 2491021", "GDrive": "ATLAS / SolMan KT / Alert-correlation-SUD.pptx"},
     ),
     "PRB0019205": Ticket(
@@ -459,6 +503,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Integration support is replaying the failed defect payload and validating the CHG0092100 mapping.",
         additional_comments=["Release manager reported that ALM Defect #4091 is missing from the ServiceNow change record.", "Customer-visible update: API bridge replay is in progress."],
         similar_records=[{"id": "PRB0019205", "score": 85, "title": "SolMan ChaRM Transport Synchronization Failure", "state": "Root Cause Analysis", "resolution_date": "Active PRB"}],
+        comments=_journal_thread("INC0048122", requester="Release Management", l1_support="Integration Service Desk", l2_support="Avery Brooks", initial_report="HP ALM Defect 4091 did not synchronize into ServiceNow change CHG0092100 for the SAP SD release.", monitoring_check="L1 verified the API bridge failure and captured the failed payload correlation identifier.", business_impact="The release manager cannot complete change evidence and needs the defect record visible before the deployment review.", diagnostic_update="Enterprise integration support is replaying the payload and validating the HP ALM-to-ServiceNow field mapping."),
         resources={"KBA": "KBA-ALM-4091 — HP ALM to ServiceNow sync", "Veeva": "Veeva Vault / QMS / ALM-ServiceNow-Bridge-SOP", "GDrive": "ATLAS / ALM KT / Defect-sync-replay-SUD.pdf"},
     ),
     "INC0048125": Ticket(
@@ -468,6 +513,7 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="SAP SD support requested the caller's confirmation of the tax-code scenario before the approved correction can proceed.",
         closure_notes="Close after the caller confirms the tax-code treatment and billing completes successfully.",
         additional_comments=["Finance needs clarification on the customer tax-code scenario before the billing correction is applied.", "Customer-visible update: SAP SD support is awaiting the requested tax-code confirmation."],
+        comments=_journal_thread("INC0048125", requester="Finance Operations", l1_support="Finance Service Desk", l2_support="Marco Silva", initial_report="Billing is paused because the customer tax-code treatment requires clarification for this SAP SD release.", monitoring_check="L1 reviewed the billing log and confirmed the exception is limited to the unresolved customer tax-code scenario.", business_impact="The billing team cannot process the affected customer invoices until the tax-code decision is confirmed.", diagnostic_update="SAP SD support documented the required tax-code options and is awaiting caller confirmation before applying the controlled correction."),
         resources={"KBA": "KBA-SAP-SD-221 — Customer tax-code billing validation", "Veeva": "Veeva Vault / Finance / SD-Tax-Code-Control", "GDrive": "ATLAS / SAP KT Hub / SD / Customer-tax-code-billing-SUD.pdf"},
     ),
 }
