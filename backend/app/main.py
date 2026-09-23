@@ -22,11 +22,24 @@ class ChatQuery(BaseModel):
     action: Literal["chat", "generate_cr", "generate_rca"] = "chat"
 
 
+def classify_breach_reason(ticket: Ticket) -> str:
+    """Classify incident breach ownership using the standard ServiceNow rules."""
+
+    if ticket.on_hold_reason == "Awaiting Vendor":
+        return "BR_INC_Vendor Dependency"
+    if ticket.on_hold_reason in {"Awaiting Caller", "Awaiting User", "Awaiting Customer"}:
+        return "BR_INC_To's and Fro's b/w user and assignee"
+    if ticket.on_hold_reason in {"Awaiting Change", "Awaiting Problem"}:
+        return "BR_INC_Change/Problem Dependency"
+    return "BR_INC_Delayed By Assignee"
+
+
 def ticket_payload(ticket: Ticket) -> dict:
     return {
         **ticket.model_dump(),
         "health_color": calculate_health_color(ticket),
         "customer_sentiment": calculate_customer_sentiment(ticket),
+        "breach_reason": classify_breach_reason(ticket) if ticket.is_breached else None,
     }
 
 
