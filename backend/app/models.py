@@ -73,6 +73,7 @@ class Ticket(BaseModel):
     is_breached: bool = False
     on_hold_reason: str | None = None
     sla_status: SlaStatus | None = None
+    sla_remaining_minutes: int | None = None
     sla_remaining_mins: int | None = None
     sla_remaining_percent: int | None = None
     sentiment: Sentiment | None = None
@@ -129,6 +130,9 @@ class Ticket(BaseModel):
         self.priority = priority_map.get(self.priority, self.priority)
         state_map = {"Fulfillment": "In Progress", "Root Cause Analysis": "Root Cause Analysis"}
         self.state = state_map.get(self.state, self.state)
+        self.sla_remaining_minutes = self.sla_remaining_minutes if self.sla_remaining_minutes is not None else self.sla_remaining_mins
+        # Retain the original field while API consumers migrate to the canonical name.
+        self.sla_remaining_mins = self.sla_remaining_minutes
         self.sla_remaining_percent = self.sla_remaining_percent if self.sla_remaining_percent is not None else {
             "BREACHED": 15,
             "AT_RISK": 35,
@@ -305,7 +309,7 @@ MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
-        priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", is_breached=True, on_hold_reason=None, sla_status="BREACHED", sla_remaining_mins=15, sla_remaining_percent=15, sentiment="Frustrated",
+        priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", is_breached=True, on_hold_reason=None, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
         child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
@@ -409,7 +413,7 @@ MOCK_DB: dict[str, Ticket] = {
     "INC0048110": Ticket(
         id="INC0048110", type="INC", record_type="INC", title="SAP MM PO Workflow Release Failure",
         description="Purchase orders in SAP MM remain stuck in the approval workflow and cannot be released to suppliers.", state="On Hold",
-        priority="P2", assignee="Nina Keller", assignment_group="SAP MM Support", is_breached=True, on_hold_reason="Awaiting Change", sla_status="AT_RISK", sla_remaining_mins=95, sentiment="Impatient",
+        priority="P2", assignee="Nina Keller", assignment_group="SAP MM Support", is_breached=True, on_hold_reason="Awaiting Change", sla_status="AT_RISK", sla_remaining_minutes=-45, sentiment="Impatient",
         child_incident_ids=["INC0048111"], latest_work_notes="Workflow agent trace shows a missing substitution rule after the latest purchasing-org update.",
         closure_notes="Close after test POs complete approval and the buyer confirms release processing.",
         additional_comments=["Buyers report that high-priority PO approvals have been waiting longer than two hours.", "SAP MM support is comparing the affected purchasing organization to the working template."],
@@ -470,7 +474,7 @@ MOCK_DB: dict[str, Ticket] = {
     "INC0048120": Ticket(
         id="INC0048120", type="INC", record_type="INC", title="SolMan Alert: SM37 Batch Job Z_EWM_RECON_NIGHTLY failed with ABAP dump",
         description="SolMan Technical Monitoring detected job Z_EWM_RECON_NIGHTLY canceled in client 100 with dump ITAB_ERROR_IN_INITIAL_SIZE.", state="On Hold",
-        priority="P1", assignee="Jonas Weber", assignment_group="SAP Basis Ops", is_breached=True, on_hold_reason="Awaiting Vendor", sla_status="BREACHED", sla_remaining_mins=18, sentiment="Frustrated",
+        priority="P1", assignee="Jonas Weber", assignment_group="SAP Basis Ops", is_breached=True, on_hold_reason="Awaiting Vendor", sla_status="BREACHED", sla_remaining_minutes=-120, sentiment="Frustrated",
         latest_work_notes="Basis on-call is reviewing SM37 spool and ST22 dump evidence for the nightly EWM reconciliation run.",
         additional_comments=["SolMan monitoring raised a P1 alert after the nightly reconciliation job canceled.", "Warehouse reconciliation is delayed pending batch job recovery."],
         similar_records=[{"id": "INC0048121", "score": 98, "title": "Duplicate: Nightly EWM reconciliation job cancellation alert", "state": "New", "resolution_date": "Current Triage Queue"}],
@@ -509,7 +513,7 @@ MOCK_DB: dict[str, Ticket] = {
     "INC0048125": Ticket(
         id="INC0048125", type="INC", record_type="INC", title="SAP SD Customer Tax Code Clarification Required",
         description="Billing processing is paused while the caller confirms the required customer tax-code treatment for the release.", state="On Hold",
-        priority="P2", assignee="Marco Silva", assignment_group="SAP SD Support", is_breached=True, on_hold_reason="Awaiting Caller", sla_status="BREACHED", sla_remaining_mins=0, sentiment="Impatient",
+        priority="P2", assignee="Marco Silva", assignment_group="SAP SD Support", is_breached=True, on_hold_reason="Awaiting Caller", sla_status="BREACHED", sla_remaining_minutes=-15, sentiment="Impatient",
         latest_work_notes="SAP SD support requested the caller's confirmation of the tax-code scenario before the approved correction can proceed.",
         closure_notes="Close after the caller confirms the tax-code treatment and billing completes successfully.",
         additional_comments=["Finance needs clarification on the customer tax-code scenario before the billing correction is applied.", "Customer-visible update: SAP SD support is awaiting the requested tax-code confirmation."],

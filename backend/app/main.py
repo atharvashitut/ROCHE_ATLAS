@@ -151,7 +151,8 @@ def chat_response(query: ChatQuery) -> str:
         context = f"{ticket.id} ({ticket.type}) is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}."
         if ticket.type in {"INC", "RITM"}:
             customer_sentiment = calculate_customer_sentiment(ticket)
-            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {customer_sentiment['status']} ({customer_sentiment['score_pct']}%). Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
+            sla_summary = f"SLA is breached by {abs(ticket.sla_remaining_minutes or 0)} minutes" if ticket.is_breached or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0) else f"SLA has {ticket.sla_remaining_minutes} minutes remaining"
+            return f"{context} {sla_summary} and customer sentiment is {customer_sentiment['status']} ({customer_sentiment['score_pct']}%). Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         if ticket.type == "PRB":
             return f"{context} RCA phase is {ticket.prb_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         return f"{context} Change phase is {ticket.chg_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
