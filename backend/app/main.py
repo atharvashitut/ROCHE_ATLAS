@@ -13,6 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color
+from .rag_engine import query_gemini_rag
 
 
 class ChatQuery(BaseModel):
@@ -197,10 +198,14 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         normalized_id = found_id
 
     normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
+    rag_result = query_gemini_rag(query.message)
     response = chat_response(normalized_query)
     ticket = MOCK_DB.get(normalized_id) if normalized_id else None
-    if action == "chat" and ticket:
-        response = f"Here is the information for {ticket.id}: {response}"
+    if action == "chat":
+        response = rag_result["answer"]
+        if ticket:
+            ticket_context = chat_response(normalized_query)
+            response = f"Here is the information for {ticket.id}: {ticket_context}\n\n{response}"
     if ticket and ticket.similar_records:
         response = "⚠️ **AI Similarity Detection Triggered:** I found historical patterns matching this issue.\n\n" + response
     return {
@@ -212,7 +217,16 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "ai_resolution_guide": ticket.ai_resolution_guide if ticket else None,
         "knowledge_refs": ticket.knowledge_refs if ticket else [],
         "topology": topology_payload(ticket) if ticket else None,
+        "sources": rag_result["sources"],
+        "model_used": rag_result["model_used"],
     }
+
+
+@app.post("/api/chat")
+def query_chat_compat(query: ChatQuery) -> dict[str, object]:
+    """Compatibility route for clients using the concise chat endpoint."""
+
+    return query_chat(query)
 
 
 class SPAStaticFiles(StaticFiles):
