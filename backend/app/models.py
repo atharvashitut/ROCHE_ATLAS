@@ -275,7 +275,14 @@ MOCK_DB: dict[str, Ticket] = {
         child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
-        additional_comments=["Our goods issue processing is blocked and the VP is asking for status immediately. The queue is still stuck.", "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration team."],
+        comments=[
+            {"sys_id": "f3f59c2a7f574d148483000000000001", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 08:30:00", "value": "Batch processing for warehouse goods issue failed in SAP EWM. Scanners are displaying authorization error SM12/qRFC queue lock.", "is_customer": True},
+            {"sys_id": "f3f59c2a7f574d148483000000000002", "element": "comments", "sys_created_by": "Alex Rivera", "sys_created_on": "2026-09-23 08:45:00", "value": "Initial triage complete. Attempted manual qRFC queue flush in SolMan, but queue remained locked. Escalating to SAP EWM L2 Support.", "is_customer": False},
+            {"sys_id": "f3f59c2a7f574d148483000000000003", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 09:30:00", "value": "Our goods issue processing is blocked and the VP is asking for status immediately. The queue is still stuck!", "is_customer": True},
+            {"sys_id": "f3f59c2a7f574d148483000000000004", "element": "comments", "sys_created_by": "Maya Chen", "sys_created_on": "2026-09-23 10:15:00", "value": "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration middleware team.", "is_customer": False},
+            {"sys_id": "f3f59c2a7f574d148483000000000005", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 11:10:00", "value": "Warehouse shift is ending in 1 hour. Can we get an ETA on the emergency patch deployment?", "is_customer": True},
+            {"sys_id": "f3f59c2a7f574d148483000000000006", "element": "comments", "sys_created_by": "Maya Chen", "sys_created_on": "2026-09-23 11:15:00", "value": "Emergency patch CHG0092100 is approved and CTASK001 pre-patch backup is complete. Proceeding with qRFC queue unlock.", "is_customer": False},
+        ],
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / ATLAS-Auth-Investigation", "GDrive": "ATLAS / Major Incidents / INC0048102"},
     ),
     "RITM0094101": Ticket(
