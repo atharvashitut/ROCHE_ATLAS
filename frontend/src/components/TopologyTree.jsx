@@ -41,7 +41,8 @@ function EmptyNode({ children }) { return <span className="rounded-lg border bor
 function GraphColumn({ children }) { return <div className="grid gap-2">{children}</div> }
 
 function CurrentNode({ ticket, onSelectTicket }) {
-  const current = { number: ticket.number || ticket.id, title: ticket.title, short_description: ticket.short_description, state: ticket.state, type: ticket.type, close_notes: ticket.close_notes, chg_phase: ticket.chg_phase, prb_phase: ticket.prb_phase, comments: ticket.comments, child_incidents: ticket.child_incidents, ctasks: ticket.ctasks, ptasks: ticket.ptasks, sctasks: ticket.sctasks, latest_note: ticket.work_notes?.at(-1) }
+  const latestWorkNote = ticket.work_notes?.at(-1)
+  const current = { number: ticket.number || ticket.id, title: ticket.title, short_description: ticket.short_description, state: ticket.state, type: ticket.type, close_notes: ticket.close_notes, chg_phase: ticket.chg_phase, prb_phase: ticket.prb_phase, comments: ticket.comments, child_incidents: ticket.child_incidents, ctasks: ticket.ctasks, ptasks: ticket.ptasks, sctasks: ticket.sctasks, latest_note: latestWorkNote?.value || latestWorkNote }
   return <TopologyNode label="Current Record" node={current} onSelectTicket={onSelectTicket} tone="indigo" />
 }
 

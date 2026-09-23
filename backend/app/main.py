@@ -22,7 +22,44 @@ class ChatQuery(BaseModel):
 
 
 def ticket_payload(ticket: Ticket) -> dict:
-    return {**ticket.model_dump(), "health_color": calculate_health_color(ticket)}
+    return {
+        **ticket.model_dump(),
+        "health_color": calculate_health_color(ticket),
+        "customer_sentiment": calculate_customer_sentiment(ticket),
+    }
+
+
+def calculate_customer_sentiment(ticket: Ticket) -> dict[str, object]:
+    """Score only caller/requested-for comments, excluding support journal entries."""
+
+    customer_comments = sorted(
+        (entry for entry in ticket.comments if entry.is_customer),
+        key=lambda entry: entry.sys_created_on,
+    )
+    if not customer_comments:
+        return {"status": "Neutral", "score_pct": 0, "explanation": "No caller-authored additional comments are available for scoring."}
+
+    latest = customer_comments[-1]
+    latest_text = latest.value.lower()
+    keywords = ("blocked", "immediately", "stuck", "vp", "urgent")
+    matched = [keyword for keyword in keywords if keyword in latest_text]
+    score = min(100, len(matched) * 20)
+    low_sla = ticket.sla_remaining_percent is not None and ticket.sla_remaining_percent < 20
+    if low_sla:
+        score = min(100, round(score * 1.5))
+
+    if any(term in latest_text for term in ("thank", "resolved", "appreciate")):
+        status = "Satisfied"
+    elif score >= 70:
+        status = "Frustrated"
+    elif score >= 20:
+        status = "Impatient"
+    else:
+        status = "Neutral"
+
+    trigger = f"urgent caller phrasing ({', '.join(repr(keyword) for keyword in matched)})" if matched else "no urgency keywords in the latest caller update"
+    sla_clause = f" and low SLA time remaining ({ticket.sla_remaining_percent}%)" if low_sla else ""
+    return {"status": status, "score_pct": score, "explanation": f"Triggered by {trigger}{sla_clause}."}
 
 
 def find_ticket_by_reference(ticket_reference: str) -> Ticket | None:
@@ -99,7 +136,8 @@ def chat_response(query: ChatQuery) -> str:
     if ticket:
         context = f"{ticket.id} ({ticket.type}) is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}."
         if ticket.type in {"INC", "RITM"}:
-            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {ticket.sentiment}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
+            customer_sentiment = calculate_customer_sentiment(ticket)
+            return f"{context} SLA has {ticket.sla_remaining_mins} minutes remaining and customer sentiment is {customer_sentiment['status']} ({customer_sentiment['score_pct']}%). Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         if ticket.type == "PRB":
             return f"{context} RCA phase is {ticket.prb_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         return f"{context} Change phase is {ticket.chg_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"

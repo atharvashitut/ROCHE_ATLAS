@@ -40,6 +40,17 @@ ALL_ASSIGNMENT_GROUPS = [
 ]
 
 
+class ServiceNowJournalEntry(BaseModel):
+    """ServiceNow sys_journal_field entry used for comments and work notes."""
+
+    sys_id: str
+    element: Literal["comments", "work_notes"]
+    sys_created_by: str
+    sys_created_on: str
+    value: str
+    is_customer: bool
+
+
 class Ticket(BaseModel):
     """A common ticket shape with metrics applicable to its ServiceNow type."""
 
@@ -56,9 +67,12 @@ class Ticket(BaseModel):
     priority: str
     assignee: str
     assigned_to: str = ""
+    caller_id: str = ""
+    requested_for: str = ""
     assignment_group: str
     sla_status: SlaStatus | None = None
     sla_remaining_mins: int | None = None
+    sla_remaining_percent: int | None = None
     sentiment: Sentiment | None = None
     rca_phase: str | None = None
     cab_status: str | None = None
@@ -78,8 +92,8 @@ class Ticket(BaseModel):
     resources: dict[str, str]
     chg_phase: str | None = None
     prb_phase: str | None = None
-    work_notes: list[str] = Field(default_factory=list)
-    comments: list[str] = Field(default_factory=list)
+    work_notes: list[ServiceNowJournalEntry] = Field(default_factory=list)
+    comments: list[ServiceNowJournalEntry] = Field(default_factory=list)
     additional_comments: list[str] = Field(default_factory=list)
     ctasks: list[dict[str, object]] = Field(default_factory=list)
     ptasks: list[dict[str, object]] = Field(default_factory=list)
@@ -107,14 +121,26 @@ class Ticket(BaseModel):
         self.title = self.short_description
         self.assigned_to = self.assigned_to or self.assignee
         self.assignee = self.assigned_to
+        self.caller_id = self.caller_id or f"{self.assignment_group} Requester"
+        self.requested_for = self.requested_for or self.caller_id
         priority_map = {"P1": "1 - Critical", "P2": "2 - High", "P3": "3 - Moderate", "P4": "4 - Low"}
         self.priority = priority_map.get(self.priority, self.priority)
         state_map = {"Fulfillment": "In Progress", "Root Cause Analysis": "Root Cause Analysis"}
         self.state = state_map.get(self.state, self.state)
-        self.work_notes = self.work_notes or [self.latest_work_notes]
+        self.sla_remaining_percent = self.sla_remaining_percent if self.sla_remaining_percent is not None else {
+            "BREACHED": 15,
+            "AT_RISK": 35,
+            "ON_TRACK": 65,
+        }.get(self.sla_status or "", None)
+        self.work_notes = _normalise_journal_entries(
+            self.work_notes or [self.latest_work_notes],
+            element="work_notes",
+            ticket=self,
+        )
         if self.type in {"INC", "RITM"}:
-            self.comments = self.comments or self.additional_comments or self.work_notes.copy()
-            self.additional_comments = self.comments
+            source_comments = self.comments or self.additional_comments or [self.latest_work_notes]
+            self.comments = _normalise_journal_entries(source_comments, element="comments", ticket=self)
+            self.additional_comments = [entry.value for entry in self.comments]
         self.ctasks = [_normalise_task(task, "ctask", self) for task in self.ctasks]
         self.ptasks = [_normalise_task(task, "ptask", self) for task in self.ptasks]
         self.sctasks = [_normalise_task(task, "sctask", self) for task in self.sctasks]
@@ -134,6 +160,40 @@ class Ticket(BaseModel):
             "validate service recovery with the requester, and document the evidence in work notes."
         )
         return self
+
+
+def _normalise_journal_entries(
+    entries: list[ServiceNowJournalEntry] | list[str],
+    *,
+    element: Literal["comments", "work_notes"],
+    ticket: Ticket,
+) -> list[ServiceNowJournalEntry]:
+    """Convert legacy mock strings to role-aware ServiceNow journal entries."""
+
+    normalized: list[ServiceNowJournalEntry] = []
+    for index, entry in enumerate(entries):
+        if isinstance(entry, ServiceNowJournalEntry):
+            normalized.append(entry)
+            continue
+        is_customer = element == "comments" and index % 2 == 0
+        normalized.append(ServiceNowJournalEntry(
+            sys_id=hashlib.md5(f"{ticket.id}-{element}-{index}".encode()).hexdigest(),
+            element=element,
+            sys_created_by=ticket.caller_id if is_customer else ticket.assigned_to,
+            sys_created_on=f"2026-09-23 11:{10 + index * 5:02d}:00",
+            value=entry,
+            is_customer=is_customer,
+        ))
+    if element == "comments" and not any(not entry.is_customer for entry in normalized):
+        normalized.append(ServiceNowJournalEntry(
+            sys_id=hashlib.md5(f"{ticket.id}-comments-support".encode()).hexdigest(),
+            element="comments",
+            sys_created_by=ticket.assigned_to,
+            sys_created_on="2026-09-23 11:30:00",
+            value=ticket.latest_work_notes,
+            is_customer=False,
+        ))
+    return normalized
 
 
 def _normalise_task(task: dict[str, str], task_kind: str, ticket: Ticket) -> dict[str, str | list[str] | None]:
@@ -211,11 +271,11 @@ MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
-        priority="P1", assignee="Maya Chen", assignment_group="SAP EWM Support", sla_status="BREACHED", sla_remaining_mins=15, sentiment="Frustrated",
+        priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", sla_status="BREACHED", sla_remaining_mins=15, sla_remaining_percent=15, sentiment="Frustrated",
         child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
-        additional_comments=["Warehouse operations reports outbound queues are locked after the replication job retry.", "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration team."],
+        additional_comments=["Our goods issue processing is blocked and the VP is asking for status immediately. The queue is still stuck.", "SAP EWM support is validating the qRFC queue owner and unlock procedure with the integration team."],
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / ATLAS-Auth-Investigation", "GDrive": "ATLAS / Major Incidents / INC0048102"},
     ),
     "RITM0094101": Ticket(
@@ -404,7 +464,7 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
         "short_description": ticket.short_description,
         "state": ticket.state,
         "type": ticket.type,
-        "latest_note": ticket.work_notes[-1],
+        "latest_note": ticket.work_notes[-1].value,
         "comments": ticket.comments,
         "additional_comments": ticket.additional_comments,
         "ctasks": ticket.ctasks,
