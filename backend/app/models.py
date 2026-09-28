@@ -7,6 +7,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from .central_db import central_knowledge_references, register_ticket_records
+
 HealthColor = Literal["RED", "YELLOW", "GREEN"]
 TicketType = Literal["INC", "RITM", "PRB", "CHG"]
 SlaStatus = Literal["BREACHED", "AT_RISK", "ON_TRACK"]
@@ -180,7 +182,7 @@ class Ticket(BaseModel):
             self.prb_phase = self.prb_phase or ("RCA" if self.rca_phase else "Assess")
         if self.type == "CHG":
             self.chg_phase = self.chg_phase or {"Scheduled": "Schedule", "Implement": "Implement", "Authorize": "Authorize", "Review": "Review", "Closed": "Closed"}.get(self.state, "Assess")
-        self.knowledge_refs = self.knowledge_refs or _knowledge_references(self.number, self.title)
+        self.knowledge_refs = central_knowledge_references(self.number, self.title) or self.knowledge_refs or _knowledge_references(self.number, self.title)
         self.ai_resolution_guide = self.ai_resolution_guide or (
             f"Confirm the reported impact, execute the approved remediation for {self.title}, "
             "validate service recovery with the requester, and document the evidence in work notes."
@@ -605,6 +607,7 @@ MOCK_DB: dict[str, Ticket] = {
         state="On Hold", priority="P1", assignee="Marco Silva", caller_id="Finance Operations", assignment_group="SAP SD Support",
         is_breached=True, on_hold_reason="Awaiting Change", sla_status="BREACHED", sla_remaining_minutes=-45, sentiment="Frustrated",
         latest_work_notes="SD/FICO L2 validated the tax configuration mismatch and is awaiting the controlled transport referenced in the recovery plan.",
+        similar_records=[{"id": "PRB0030991", "score": 92, "title": "Historical Root Cause: SD-FI Tax Code Determination Mapping", "state": "Closed", "resolution_date": "2026-08-17"}],
         comments=_journal_thread("INC0048110", requester="Finance Operations", l1_support="Finance Service Desk", l2_support="Marco Silva", initial_report="Billing documents are blocked because SD-FI posting fails during tax code determination.", monitoring_check="L1 correlated failed billing document logs with the affected tax determination configuration.", business_impact="Finance cannot close the current billing batch until postings reach FICO.", diagnostic_update="SD/FICO L2 isolated the configuration mismatch and is preparing controlled transport validation."),
         attachments=[
             {"filename": "po_release_authorization_failure.png", "content_type": "image/svg+xml", "size": "824 KB", "url": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='675'%3E%3Crect width='100%25' height='100%25' fill='%230f172a'/%3E%3Ctext x='70' y='130' fill='%2367e8f9' font-size='42' font-family='Arial'%3ESAP authorization evidence%3C/text%3E%3C/svg%3E"},
@@ -618,12 +621,6 @@ MOCK_DB: dict[str, Ticket] = {
         state="In Progress", priority="P2", assignee="Priya Nair", caller_id="Product Compliance", assignment_group="SAP PLM Support",
         sla_status="AT_RISK", sla_remaining_minutes=95, sentiment="Impatient", latest_work_notes="PLM L2 is comparing classification payload mappings against the approved EHS specification schema.",
         comments=_journal_thread("INC0048125", requester="Product Compliance", l1_support="PLM Service Desk", l2_support="Priya Nair", initial_report="EHS specifications are not synchronizing from SAP PLM to Material Master classification.", monitoring_check="L1 confirmed the integration failure in the PLM monitoring dashboard and collected the failed payload ID.", business_impact="Product compliance cannot release the affected materials until classification data is current.", diagnostic_update="PLM L2 is validating the field mapping, controlled specification schema, and the related known defect."),
-        knowledge_refs=[
-            {"source_type": "Veeva Vault SOP", "title": "VEEVA-SPEC-0099 — EHS specification synchronization SOP", "path_or_url": "https://roche.veevavault.com/documents/VEEVA-SPEC-0099", "summary": "Controlled validation procedure for EHS specifications and Material Master classification."},
-            {"source_type": "HP ALM Defect", "title": "ALM-DEF-8812 — PLM classification sync defect", "path_or_url": "https://alm.roche.com/qcbin/defect/8812", "summary": "Known defect and test evidence for the PLM classification mapping path."},
-            {"source_type": "Google Drive KT/SUD Hub", "title": "GDRIVE-SUD-311 — SAP PLM classification integration architecture", "path_or_url": "https://drive.google.com/file/d/GDRIVE-SUD-311", "summary": "Architecture and support handover for the PLM-to-Material Master flow."},
-            {"source_type": "ServiceNow KBA", "title": "KB0062011 — SAP PLM EHS classification recovery", "path_or_url": "https://roche.service-now.com/kb_view.do?sysparm_article=KB0062011", "summary": "Recovery checks for failed specification synchronization."},
-        ],
         resources={"KBA": "KB0062011 — SAP PLM EHS classification recovery", "Veeva": "VEEVA-SPEC-0099", "ALM": "ALM-DEF-8812", "GDrive": "GDRIVE-SUD-311"},
     ),
     "INC0048130": Ticket(
@@ -634,6 +631,15 @@ MOCK_DB: dict[str, Ticket] = {
         latest_work_notes="Integration L2 preserved heap and gateway diagnostics; no matching internal KBA, defect, or SUD has been identified.",
         comments=_journal_thread("INC0048130", requester="Integration Operations", l1_support="Integration Service Desk", l2_support="Avery Brooks", initial_report="SAP PO Gateway is failing with ERR_9921_SYNC_FAIL and suspected memory corruption.", monitoring_check="L1 captured the error signature, gateway timestamp, and affected interface identifiers.", business_impact="Several asynchronous integration messages are accumulating and downstream business processes are delayed.", diagnostic_update="Integration L2 is preserving diagnostics and isolating the heap corruption pattern as a potential zero-day."),
         resources={"KBA": "No matching internal KBA", "Veeva": "No controlled procedure identified", "GDrive": "Pending new KT/SUD"},
+    ),
+    "PRB0030991": Ticket(
+        id="PRB0030991", type="PRB", record_type="PRB", title="Historical Root Cause: SD-FI Tax Code Determination Mapping",
+        description="Closed problem record for an SD-FI billing posting block caused by an obsolete tax determination mapping.",
+        state="Closed", priority="P1", assignee="Marco Silva", assignment_group="SAP SD Support", rca_phase="Closed", risk_level="High Impact",
+        latest_work_notes="Validated billing posting recovery after transporting the corrected tax-code determination mapping.",
+        closure_notes="Corrected the tax-code determination mapping and validated successful SD billing postings into FICO.",
+        close_code="Solved (Permanently)",
+        resources={"KBA": "KB-SD-FICO-350 — Billing tax determination recovery", "Veeva": "Veeva Vault / Finance / SD-FI posting control", "GDrive": "ATLAS / SD-FICO / billing KT"},
     ),
     "PRB0031022": Ticket(
         id="PRB0031022", type="PRB", record_type="PRB", title="SAP EWM qRFC Queue Lock & Batch Authorization Root Cause Analysis",
@@ -654,7 +660,13 @@ MOCK_DB: dict[str, Ticket] = {
 }
 
 
-def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, object]:
+def _relationship_snapshot(
+    ticket_id: str,
+    include_close_notes: bool = False,
+    include_journal: bool = False,
+) -> dict[str, object]:
+    """Create relationship metadata, never a competing ticket record copy."""
+
     ticket = MOCK_DB[ticket_id]
     snapshot = {
         "sys_id": ticket.sys_id,
@@ -664,12 +676,16 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
         "state": ticket.state,
         "type": ticket.type,
         "latest_note": ticket.work_notes[-1].value,
-        "comments": [entry.model_dump() for entry in ticket.comments],
-        "additional_comments": ticket.additional_comments,
-        "ctasks": ticket.ctasks,
-        "ptasks": ticket.ptasks,
-        "sctasks": ticket.sctasks,
     }
+    if include_journal:
+        snapshot["comments"] = [entry.model_dump() for entry in ticket.comments]
+        snapshot["additional_comments"] = ticket.additional_comments
+    if ticket.type == "CHG":
+        snapshot["ctasks"] = ticket.ctasks
+    if ticket.type == "PRB":
+        snapshot["ptasks"] = ticket.ptasks
+    if ticket.type == "RITM":
+        snapshot["sctasks"] = ticket.sctasks
     if include_close_notes and ticket.close_notes:
         snapshot["close_notes"] = ticket.close_notes
     if ticket.type == "PRB":
@@ -769,3 +785,4 @@ def _enrich_relationship_topology() -> None:
 
 
 _enrich_relationship_topology()
+register_ticket_records(MOCK_DB)

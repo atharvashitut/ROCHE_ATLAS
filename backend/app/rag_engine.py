@@ -11,67 +11,13 @@ try:  # The API remains available in local development without the optional SDK.
 except ImportError:  # pragma: no cover - depends on installed optional dependencies
     genai = None
 
-from .models import MOCK_DB, Ticket
+from .central_db import central_knowledge_documents, central_ticket_records
+from .models import Ticket
 
 
-KNOWLEDGE_CORPUS: list[dict[str, str]] = [
-    {
-        "id": "KBA003192",
-        "title": "SAP EWM qRFC Queue Lock Resolution & SM12 Unlock Procedure",
-        "system": "ServiceNow",
-        "connector": "ServiceNow",
-        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KBA003192",
-        "content": "SAP EWM qRFC queue lock recovery, SM12 unlock procedure, warehouse goods issue and replication validation.",
-    },
-    {
-        "id": "VEEVA-SOP-0042",
-        "title": "GxP Standard Operating Procedure for Batch Interface Access Controls",
-        "system": "Veeva Vault",
-        "connector": "Veeva Vault",
-        "url": "https://roche.veevavault.com/documents/SOP-0042",
-        "content": "GxP compliant batch interface access controls, SAP authorization roles, approval evidence and controlled remediation.",
-    },
-    {
-        "id": "ALM-DEF-8812",
-        "title": "Known Defect: SAP PLM Classification and SolMan Alert Synchronization",
-        "system": "HP ALM",
-        "connector": "HP ALM",
-        "url": "https://alm.roche.com/qcbin/defect/8812",
-        "content": "SAP PLM classification synchronization defect, SolMan alert suppression, SAP EWM 1010 monitoring, and job-monitoring triage guidance.",
-    },
-    {
-        "id": "GDRIVE-SUD-109",
-        "title": "System Understanding Document: SAP MM PO Release Workflow Integration Architecture",
-        "system": "Google Drive",
-        "connector": "Google Drive",
-        "url": "https://drive.google.com/file/d/SUD-109-ARCH",
-        "content": "SAP MM purchase order release workflow, integration architecture, approval routing and diagnostic handover information.",
-    },
-    {
-        "id": "KB0062011",
-        "title": "SAP PLM EHS Classification Synchronization Recovery",
-        "system": "ServiceNow",
-        "connector": "ServiceNow",
-        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KB0062011",
-        "content": "SAP PLM EHS specification, Material Master classification, mapping validation, and controlled recovery checks.",
-    },
-    {
-        "id": "VEEVA-SPEC-0099",
-        "title": "Controlled EHS Specification Synchronization Procedure",
-        "system": "Veeva Vault",
-        "connector": "Veeva Vault",
-        "url": "https://roche.veevavault.com/documents/VEEVA-SPEC-0099",
-        "content": "GxP-controlled SAP PLM EHS specification and Material Master classification reconciliation procedure.",
-    },
-    {
-        "id": "GDRIVE-SUD-311",
-        "title": "SAP PLM to Material Master Classification Integration Architecture",
-        "system": "Google Drive",
-        "connector": "Google Drive",
-        "url": "https://drive.google.com/file/d/GDRIVE-SUD-311",
-        "content": "System understanding document for SAP PLM, MM classification mappings, payload flow, and L2 support handover.",
-    },
-]
+# A compatibility name for existing callers; its values are supplied solely by
+# the central registry rather than a second hard-coded RAG corpus.
+KNOWLEDGE_CORPUS: list[dict[str, str]] = central_knowledge_documents()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 try:
@@ -120,7 +66,7 @@ def _connector_chunks() -> dict[str, list[dict[str, str]]]:
     connectors = {name: [] for name in ("ServiceNow", "Veeva Vault", "HP ALM", "Google Drive")}
     for chunk in KNOWLEDGE_CORPUS:
         connectors[chunk["connector"]].append(chunk)
-    connectors["ServiceNow"].extend(_ticket_chunk(ticket) for ticket in MOCK_DB.values())
+    connectors["ServiceNow"].extend(_ticket_chunk(ticket) for ticket in central_ticket_records().values())
     return connectors
 
 
@@ -158,7 +104,7 @@ def _targets_unmapped_issue(query_text: str) -> bool:
     """
 
     signatures = re.findall(r"[a-z]+[_-]\d+[a-z0-9_-]*|\b\d{4,}\b", query_text.casefold())
-    for ticket in MOCK_DB.values():
+    for ticket in central_ticket_records().values():
         if ticket.is_known_issue:
             continue
         searchable = f"{ticket.number} {ticket.short_description} {ticket.description}".casefold()

@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color, resolve_child_tickets
+from .central_db import central_knowledge_documents, central_knowledge_summary, central_ticket_by_reference, central_ticket_records
+from .models import ALL_ASSIGNMENT_GROUPS, Ticket, calculate_health_color, resolve_child_tickets
 from .rag_engine import query_hybrid_rag
 
 
@@ -86,21 +87,23 @@ def calculate_customer_sentiment(ticket: Ticket) -> dict[str, object]:
 def find_ticket_by_reference(ticket_reference: str) -> Ticket | None:
     """Resolve a ServiceNow number, true sys_id, or topology snapshot sys_id."""
 
+    ticket_db = central_ticket_records()
+    ticket = central_ticket_by_reference(ticket_reference)
+    if ticket is not None:
+        return ticket
+
     needle = ticket_reference.casefold()
-    for ticket in MOCK_DB.values():
-        if needle in {ticket.id.casefold(), ticket.number.casefold(), ticket.sys_id.casefold()}:
-            return ticket
 
     relationship_records = (
         (ticket.parent_incident, *ticket.child_incidents, ticket.linked_prb, ticket.linked_chg, *ticket.originating_tickets)
-        for ticket in MOCK_DB.values()
+        for ticket in ticket_db.values()
     )
     for records in relationship_records:
         for record in records:
             if not record:
                 continue
             if needle in {str(record.get("number", "")).casefold(), str(record.get("sys_id", "")).casefold()}:
-                return MOCK_DB.get(str(record.get("number", "")).upper())
+                return ticket_db.get(str(record.get("number", "")).upper())
     return None
 
 
@@ -127,7 +130,7 @@ def find_ticket_from_natural_language(query_text: str) -> str | None:
     terms = [term for term in re.findall(r"[A-Z0-9]{2,}", query_text.upper()) if term.lower() not in stop_words and term != "SAP"]
     best_id: str | None = None
     best_score = 0
-    for ticket_id, ticket in MOCK_DB.items():
+    for ticket_id, ticket in central_ticket_records().items():
         knowledge_text = " ".join(
             " ".join(reference.values()) for reference in ticket.knowledge_refs
         )
@@ -146,7 +149,7 @@ def find_ticket_from_natural_language(query_text: str) -> str | None:
 
 
 def chat_response(query: ChatQuery) -> str:
-    ticket = MOCK_DB.get(query.ticket_id) if query.ticket_id else None
+    ticket = central_ticket_by_reference(query.ticket_id) if query.ticket_id else None
     context = f" for {ticket.id}" if ticket else ""
     if query.action == "generate_cr":
         title = ticket.title if ticket else "the selected service issue"
@@ -171,7 +174,7 @@ app = FastAPI(title="Roche ATLAS ITSM Co-Pilot", version="1.0.0")
 
 @app.get("/api/dashboard/tickets")
 def list_dashboard_tickets(assignee: str | None = None, assignment_group: str | None = None) -> dict[str, list[dict]]:
-    tickets = list(MOCK_DB.values())
+    tickets = list(central_ticket_records().values())
     if assignee:
         tickets = [ticket for ticket in tickets if ticket.assignee == assignee]
     if assignment_group:
@@ -186,6 +189,13 @@ def list_assignment_groups() -> dict[str, list[str]]:
     return {"assignment_groups": ALL_ASSIGNMENT_GROUPS}
 
 
+@app.get("/api/knowledge/sources")
+def list_central_knowledge_sources() -> dict[str, object]:
+    """Expose the canonical multi-platform registry used by tickets and RAG."""
+
+    return {**central_knowledge_summary(), "sources": central_knowledge_documents()}
+
+
 @app.get("/api/tickets/{ticket_id}")
 def get_ticket(ticket_id: str) -> dict[str, dict]:
     ticket = find_ticket_by_reference(ticket_id)
@@ -196,12 +206,13 @@ def get_ticket(ticket_id: str) -> dict[str, dict]:
 
 @app.post("/api/chat/query")
 def query_chat(query: ChatQuery) -> dict[str, object]:
-    if query.ticket_id and query.ticket_id.upper() not in MOCK_DB:
+    ticket_db = central_ticket_records()
+    if query.ticket_id and query.ticket_id.upper() not in ticket_db:
         raise HTTPException(status_code=404, detail=f"Ticket {query.ticket_id} was not found")
 
     query_text = query.message.upper()
     found_id = query.ticket_id.upper() if query.ticket_id else next(
-        (ticket_id for ticket_id in MOCK_DB if ticket_id in query_text),
+        (ticket_id for ticket_id in ticket_db if ticket_id in query_text),
         None,
     )
     found_id = found_id or find_ticket_from_natural_language(query_text)
@@ -210,10 +221,10 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
 
     if query.action == "generate_rca" or rca_intent:
         action = "generate_rca"
-        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "PRB" else "PRB0031022"
+        normalized_id = found_id if found_id and ticket_db[found_id].type == "PRB" else "PRB0031022"
     elif query.action == "generate_cr" or cr_intent:
         action = "generate_cr"
-        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "CHG" else "CHG0092100"
+        normalized_id = found_id if found_id and ticket_db[found_id].type == "CHG" else "CHG0092100"
     else:
         action = "chat"
         normalized_id = found_id
@@ -221,7 +232,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
     normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
     rag_result = query_hybrid_rag(query.message)
     response = chat_response(normalized_query)
-    ticket = MOCK_DB.get(normalized_id) if normalized_id else None
+    ticket = ticket_db.get(normalized_id) if normalized_id else None
     if action == "chat":
         response = rag_result["answer"]
         if ticket:

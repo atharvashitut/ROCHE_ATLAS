@@ -52,7 +52,9 @@ function ChangeTaskBranch({ change, onSelectTicket, label = 'Linked Fix Change' 
 }
 
 function IncidentGraph({ ticket, onSelectTicket }) {
-  const children = ticket.child_incidents || []
+  // Prefer API-hydrated child_tickets so every node has the live child journal
+  // stream. child_incidents is kept for older chat payloads.
+  const children = ticket.child_tickets?.length ? ticket.child_tickets : (ticket.child_incidents || [])
   return <><GraphColumn>{ticket.parent_incident ? <TopologyNode label="Parent Incident" node={ticket.parent_incident} onSelectTicket={onSelectTicket} tone="cyan" /> : <EmptyNode>No Parent INC</EmptyNode>}</GraphColumn><span className="text-slate-500">→</span><CurrentNode ticket={ticket} onSelectTicket={onSelectTicket} /><span className="text-slate-500">→</span><div className="grid gap-3"><GraphColumn>{children.map((child) => <TopologyNode key={child.number} label="Child Incident" node={child} onSelectTicket={onSelectTicket} tone="cyan" />)}{ticket.linked_prb && <TopologyNode label="Linked PRB" node={ticket.linked_prb} onSelectTicket={onSelectTicket} tone="amber" />}{!children.length && !ticket.linked_prb && !ticket.linked_chg && <EmptyNode>No downstream records</EmptyNode>}</GraphColumn><ChangeTaskBranch change={ticket.linked_chg} onSelectTicket={onSelectTicket} label="Linked CHG" /></div></>
 }
 
@@ -80,5 +82,5 @@ export default function TopologyTree({ ticket, onSelectTicket }) {
     else setInspectedNode(node)
   }
   const graph = type === 'INC' ? <IncidentGraph ticket={ticket} onSelectTicket={selectNode} /> : type === 'CHG' ? <ChangeGraph ticket={ticket} onSelectTicket={selectNode} /> : type === 'PRB' ? <ProblemGraph ticket={ticket} onSelectTicket={selectNode} /> : <GenericGraph ticket={ticket} onSelectTicket={selectNode} />
-  return <section className="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><p className="mb-1 text-xs font-semibold uppercase tracking-wider text-cyan-300">Relational Topology &amp; Linked Tickets</p><p className="mb-4 text-xs text-slate-500">{type} relationship view</p><div className="overflow-x-auto"><div className="flex min-w-max items-center gap-3">{graph}</div></div><p className="mt-3 text-xs text-slate-500">Select a ticket node to load its complete ServiceNow record; task nodes open their local task details.</p>{inspectedNode && <InspectorDrawer node={inspectedNode} onClose={() => setInspectedNode(null)} />}</section>
+  return <section className="apple-topology rounded-2xl border border-slate-700 bg-slate-950/60 p-5"><p className="mb-1 text-xs font-semibold uppercase tracking-wider text-cyan-300">Relational Topology &amp; Linked Tickets</p><p className="mb-5 text-xs text-slate-500">{type} relationship view</p><div className="overflow-x-auto"><div className="flex min-w-max items-center gap-3">{graph}</div></div><p className="mt-4 text-xs text-slate-500">Select a ticket node to load its complete ServiceNow record; task nodes open their local task details.</p>{inspectedNode && <InspectorDrawer node={inspectedNode} onClose={() => setInspectedNode(null)} />}</section>
 }
