@@ -93,6 +93,12 @@ class Ticket(BaseModel):
     # record type. The *_id fields below remain internal mock-data inputs only.
     parent_incident: dict[str, object] | None = None
     originating_tickets: list[dict[str, object]] = Field(default_factory=list)
+    # Canonical relational IDs are the source of truth. Display snapshots are
+    # rebuilt from these IDs so a parent view cannot drift from the child record.
+    parent_id: str | None = None
+    child_ids: list[str] = Field(default_factory=list)
+    child_tickets: list[dict[str, object]] = Field(default_factory=list)
+    is_known_issue: bool = True
     parent_incident_id: str | None = Field(default=None, exclude=True)
     originating_ticket_ids: list[str] = Field(default_factory=list, exclude=True)
     child_incident_ids: list[str] = Field(default_factory=list, exclude=True)
@@ -143,6 +149,10 @@ class Ticket(BaseModel):
         self.sla_remaining_minutes = self.sla_remaining_minutes if self.sla_remaining_minutes is not None else self.sla_remaining_mins
         # Retain the original field while API consumers migrate to the canonical name.
         self.sla_remaining_mins = self.sla_remaining_minutes
+        self.parent_incident_id = self.parent_id or self.parent_incident_id
+        self.parent_id = self.parent_incident_id
+        self.child_incident_ids = self.child_ids or self.child_incident_ids
+        self.child_ids = self.child_incident_ids
         self.sla_remaining_percent = self.sla_remaining_percent if self.sla_remaining_percent is not None else {
             "BREACHED": 15,
             "AT_RISK": 35,
@@ -321,7 +331,7 @@ def _journal_thread(
     ]
 
 
-MOCK_DB: dict[str, Ticket] = {
+LEGACY_MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
@@ -546,6 +556,104 @@ MOCK_DB: dict[str, Ticket] = {
 }
 
 
+# The active demo catalog is deliberately small but fully relational.  Keep
+# relationship identifiers here (rather than duplicate child snapshots) and
+# resolve snapshots at API time to guarantee journal/status synchronisation.
+MOCK_DB: dict[str, Ticket] = {
+    "INC0048102": Ticket(
+        id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock & Batch Auth Failure",
+        description="SAP EWM qRFC queue locking and batch authorization failures are blocking goods issue processing across the warehouse estate.",
+        state="In Progress", priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support",
+        is_breached=True, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
+        child_ids=["INC0048103", "INC0048109"], linked_problem="PRB0031022", linked_change="CHG0092100",
+        latest_work_notes="L2 isolated the locked qRFC owner and is coordinating the emergency recovery with Basis and Security.",
+        comments=[
+            {"sys_id": "8102c001000000000000000000000001", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 08:30:00", "value": "Batch processing for warehouse goods issue failed in SAP EWM. Scanners show an authorization error and an SM12/qRFC queue lock.", "is_customer": True},
+            {"sys_id": "8102c002000000000000000000000002", "element": "comments", "sys_created_by": "Alex Rivera", "sys_created_on": "2026-09-23 08:45:00", "value": "Initial L1 triage is complete. A SolMan queue flush was attempted, but the queue remains locked; escalating to SAP EWM L2.", "is_customer": False},
+            {"sys_id": "8102c003000000000000000000000003", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 09:30:00", "value": "Goods issue processing is blocked and the VP is asking for status immediately. The queue is still stuck.", "is_customer": True},
+            {"sys_id": "8102c004000000000000000000000004", "element": "comments", "sys_created_by": "Maya Chen", "sys_created_on": "2026-09-23 10:15:00", "value": "SAP EWM L2 is validating qRFC ownership and the batch authorization path with Basis and the integration middleware team.", "is_customer": False},
+            {"sys_id": "8102c005000000000000000000000005", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 11:10:00", "value": "Warehouse shift ends in one hour. Please confirm the ETA for the emergency recovery.", "is_customer": True},
+            {"sys_id": "8102c006000000000000000000000006", "element": "comments", "sys_created_by": "Maya Chen", "sys_created_on": "2026-09-23 11:15:00", "value": "CHG0092100 is approved, the pre-patch backup is complete, and the team is proceeding with controlled qRFC queue unlock.", "is_customer": False},
+        ],
+        attachments=[
+            {"filename": "qRFC_remediation_checklist.pdf", "content_type": "application/pdf", "size": "248 KB", "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"},
+            {"filename": "sap_sm12_queue_lock_error.png", "content_type": "image/svg+xml", "size": "1.4 MB", "url": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='675'%3E%3Crect width='100%25' height='100%25' fill='%230f172a'/%3E%3Ctext x='70' y='130' fill='%2367e8f9' font-size='42' font-family='Arial'%3ESAP SM12 Queue Lock Evidence%3C/text%3E%3C/svg%3E"},
+        ],
+        resources={"KBA": "KBA003192 — SAP EWM qRFC Queue Lock Resolution", "Veeva": "Veeva Vault / QMS / Batch access controls", "GDrive": "ATLAS / EWM / qRFC recovery KT"},
+    ),
+    "INC0048103": Ticket(
+        id="INC0048103", type="INC", record_type="INC", title="Token Refresh & Authorization Failure (Object M_MSEG_LGO)",
+        description="SAP Security/GRC authorization checks fail while refreshing warehouse operations tokens for object M_MSEG_LGO.",
+        state="In Progress", priority="P2", assignee="Nina Keller", caller_id="Elena Martins", assignment_group="Identity & Access Management",
+        sla_status="AT_RISK", sla_remaining_minutes=65, sentiment="Impatient", parent_id="INC0048102",
+        latest_work_notes="Security L2 reproduced the missing M_MSEG_LGO object authorization and is validating the controlled role correction.",
+        comments=_journal_thread("INC0048103", requester="Elena Martins", l1_support="Alex Rivera", l2_support="Nina Keller", initial_report="Warehouse operators cannot refresh the mobile token and receive an M_MSEG_LGO authorization error.", monitoring_check="L1 checked GRC request history and gateway authentication traces.", business_impact="The affected users are unable to confirm goods movement during the current shift.", diagnostic_update="Security L2 reproduced the failed object check and is validating the approved role delta."),
+        resources={"KBA": "KB0062011 — GRC authorization remediation", "Veeva": "Veeva Vault / QMS / GRC role validation", "GDrive": "ATLAS / Security / M_MSEG_LGO KT"},
+    ),
+    "INC0048109": Ticket(
+        id="INC0048109", type="INC", record_type="INC", title="RF Handheld Gateway Connection Timeout on Node 02",
+        description="SAP BASIS/NetWeaver RF handheld gateway connections time out on node 02 while EWM queues are under recovery.",
+        state="In Progress", priority="P2", assignee="Jonas Weber", caller_id="Luca Bianchi", assignment_group="SAP Basis Ops",
+        sla_status="AT_RISK", sla_remaining_minutes=55, sentiment="Impatient", parent_id="INC0048102",
+        latest_work_notes="Basis L2 is comparing Node 02 ICM and gateway traces with the healthy node before a controlled restart.",
+        comments=_journal_thread("INC0048109", requester="Luca Bianchi", l1_support="Alex Rivera", l2_support="Jonas Weber", initial_report="RF handhelds are timing out when connecting through gateway node 02.", monitoring_check="L1 confirmed node 01 remains healthy and collected NetWeaver gateway timeout samples.", business_impact="Outbound loading is accumulating because handheld operators cannot post the required goods issues.", diagnostic_update="Basis L2 is reviewing ICM, gateway, and connection-pool traces before deciding on a controlled node restart."),
+        resources={"KBA": "KBA-BASIS-210 — RF gateway timeout recovery", "Veeva": "Veeva Vault / Operations / NetWeaver validation", "GDrive": "ATLAS / Basis / RF gateway KT"},
+    ),
+    "INC0048110": Ticket(
+        id="INC0048110", type="INC", record_type="INC", title="Billing Document SD-FI Posting Block & Tax Code Determination Failure",
+        description="SAP SD billing documents cannot post to FICO because tax code determination fails during SD-FI account assignment.",
+        state="On Hold", priority="P1", assignee="Marco Silva", caller_id="Finance Operations", assignment_group="SAP SD Support",
+        is_breached=True, on_hold_reason="Awaiting Change", sla_status="BREACHED", sla_remaining_minutes=-45, sentiment="Frustrated",
+        latest_work_notes="SD/FICO L2 validated the tax configuration mismatch and is awaiting the controlled transport referenced in the recovery plan.",
+        comments=_journal_thread("INC0048110", requester="Finance Operations", l1_support="Finance Service Desk", l2_support="Marco Silva", initial_report="Billing documents are blocked because SD-FI posting fails during tax code determination.", monitoring_check="L1 correlated failed billing document logs with the affected tax determination configuration.", business_impact="Finance cannot close the current billing batch until postings reach FICO.", diagnostic_update="SD/FICO L2 isolated the configuration mismatch and is preparing controlled transport validation."),
+        attachments=[
+            {"filename": "po_release_authorization_failure.png", "content_type": "image/svg+xml", "size": "824 KB", "url": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='675'%3E%3Crect width='100%25' height='100%25' fill='%230f172a'/%3E%3Ctext x='70' y='130' fill='%2367e8f9' font-size='42' font-family='Arial'%3ESAP authorization evidence%3C/text%3E%3C/svg%3E"},
+            {"filename": "sd_fi_posting_tax_error.pdf", "content_type": "application/pdf", "size": "412 KB", "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"},
+        ],
+        resources={"KBA": "KB-SD-FICO-350 — Billing tax determination recovery", "Veeva": "Veeva Vault / Finance / SD-FI posting control", "GDrive": "ATLAS / SD-FICO / billing KT"},
+    ),
+    "INC0048125": Ticket(
+        id="INC0048125", type="INC", record_type="INC", title="EHS Specification Sync Failure between SAP PLM and Material Master Classification",
+        description="SAP PLM EHS specifications fail to synchronize to Material Master classification through the controlled integration flow.",
+        state="In Progress", priority="P2", assignee="Priya Nair", caller_id="Product Compliance", assignment_group="SAP PLM Support",
+        sla_status="AT_RISK", sla_remaining_minutes=95, sentiment="Impatient", latest_work_notes="PLM L2 is comparing classification payload mappings against the approved EHS specification schema.",
+        comments=_journal_thread("INC0048125", requester="Product Compliance", l1_support="PLM Service Desk", l2_support="Priya Nair", initial_report="EHS specifications are not synchronizing from SAP PLM to Material Master classification.", monitoring_check="L1 confirmed the integration failure in the PLM monitoring dashboard and collected the failed payload ID.", business_impact="Product compliance cannot release the affected materials until classification data is current.", diagnostic_update="PLM L2 is validating the field mapping, controlled specification schema, and the related known defect."),
+        knowledge_refs=[
+            {"source_type": "Veeva Vault SOP", "title": "VEEVA-SPEC-0099 — EHS specification synchronization SOP", "path_or_url": "https://roche.veevavault.com/documents/VEEVA-SPEC-0099", "summary": "Controlled validation procedure for EHS specifications and Material Master classification."},
+            {"source_type": "HP ALM Defect", "title": "ALM-DEF-8812 — PLM classification sync defect", "path_or_url": "https://alm.roche.com/qcbin/defect/8812", "summary": "Known defect and test evidence for the PLM classification mapping path."},
+            {"source_type": "Google Drive KT/SUD Hub", "title": "GDRIVE-SUD-311 — SAP PLM classification integration architecture", "path_or_url": "https://drive.google.com/file/d/GDRIVE-SUD-311", "summary": "Architecture and support handover for the PLM-to-Material Master flow."},
+            {"source_type": "ServiceNow KBA", "title": "KB0062011 — SAP PLM EHS classification recovery", "path_or_url": "https://roche.service-now.com/kb_view.do?sysparm_article=KB0062011", "summary": "Recovery checks for failed specification synchronization."},
+        ],
+        resources={"KBA": "KB0062011 — SAP PLM EHS classification recovery", "Veeva": "VEEVA-SPEC-0099", "ALM": "ALM-DEF-8812", "GDrive": "GDRIVE-SUD-311"},
+    ),
+    "INC0048130": Ticket(
+        id="INC0048130", type="INC", record_type="INC", title="Unmapped ERR_9921_SYNC_FAIL Memory Corruption on SAP PO Gateway",
+        description="A previously unmapped ERR_9921_SYNC_FAIL memory corruption signature is causing SAP PO Gateway message processing instability.",
+        state="In Progress", priority="P1", assignee="Avery Brooks", caller_id="Integration Operations", assignment_group="Enterprise Integration Services",
+        sla_status="AT_RISK", sla_remaining_minutes=40, sentiment="Impatient", is_known_issue=False,
+        latest_work_notes="Integration L2 preserved heap and gateway diagnostics; no matching internal KBA, defect, or SUD has been identified.",
+        comments=_journal_thread("INC0048130", requester="Integration Operations", l1_support="Integration Service Desk", l2_support="Avery Brooks", initial_report="SAP PO Gateway is failing with ERR_9921_SYNC_FAIL and suspected memory corruption.", monitoring_check="L1 captured the error signature, gateway timestamp, and affected interface identifiers.", business_impact="Several asynchronous integration messages are accumulating and downstream business processes are delayed.", diagnostic_update="Integration L2 is preserving diagnostics and isolating the heap corruption pattern as a potential zero-day."),
+        resources={"KBA": "No matching internal KBA", "Veeva": "No controlled procedure identified", "GDrive": "Pending new KT/SUD"},
+    ),
+    "PRB0031022": Ticket(
+        id="PRB0031022", type="PRB", record_type="PRB", title="SAP EWM qRFC Queue Lock & Batch Authorization Root Cause Analysis",
+        description="Problem investigation into the coupled SAP EWM qRFC lock, Basis queue ownership, and batch authorization failure.",
+        state="Root Cause Analysis", priority="P1", assignee="Omar Rahman", assignment_group="Integration Middleware", rca_phase="RCA In Progress", risk_level="High Impact",
+        originating_ticket_ids=["INC0048102"], linked_change="CHG0092100", latest_work_notes="RCA identified a qRFC ownership lock compounded by a missing controlled batch authorization role.",
+        ptasks=[{"id": "PTASK001", "title": "Collect qRFC and SM12 lock traces", "state": "Closed", "close_notes": "Trace collection confirmed the blocked queue owner and authorization failure sequence."}, {"id": "PTASK002", "title": "Validate batch authorization role correction", "state": "Work in Progress"}, {"id": "PTASK003", "title": "Define preventive queue monitoring", "state": "New"}],
+        resources={"KBA": "KBA003192 — qRFC queue recovery", "Veeva": "Veeva Vault / RCA / EWM batch authorization", "GDrive": "ATLAS / EWM / RCA KT"},
+    ),
+    "CHG0092100": Ticket(
+        id="CHG0092100", type="CHG", record_type="CHG", title="Emergency SAP EWM qRFC and Batch Authorization Recovery",
+        description="Emergency change to unlock the SAP EWM qRFC queue and deploy the approved batch authorization correction.",
+        state="Implement", priority="P1", assignee="Elena Rossi", assignment_group="Integration Middleware", cab_status="CAB Approved", risk_level="Emergency Change",
+        originating_ticket_ids=["PRB0031022"], latest_work_notes="Emergency CAB approval is recorded; implementation is proceeding through the controlled recovery runbook.",
+        ctasks=[{"id": "CTASK001", "title": "Pre-patch backup and recovery point", "state": "Closed Complete", "close_notes": "Backup checksum and recovery point validated."}, {"id": "CTASK002", "title": "Deploy qRFC and authorization correction", "state": "Open"}],
+        resources={"KBA": "KBA003192 — qRFC emergency recovery", "Veeva": "Veeva Vault / Change Control / CHG0092100", "GDrive": "ATLAS / EWM / emergency change KT"},
+    ),
+}
+
+
 def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, object]:
     ticket = MOCK_DB[ticket_id]
     snapshot = {
@@ -556,7 +664,7 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
         "state": ticket.state,
         "type": ticket.type,
         "latest_note": ticket.work_notes[-1].value,
-        "comments": ticket.comments,
+        "comments": [entry.model_dump() for entry in ticket.comments],
         "additional_comments": ticket.additional_comments,
         "ctasks": ticket.ctasks,
         "ptasks": ticket.ptasks,
@@ -569,6 +677,22 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
     if ticket.type == "CHG":
         snapshot["chg_phase"] = ticket.chg_phase or "New"
     return snapshot
+
+
+def resolve_child_tickets(ticket: Ticket) -> list[dict[str, object]]:
+    """Resolve an incident's child cards directly from canonical child IDs.
+
+    The response intentionally uses the current full child record every time;
+    parent topology can therefore never retain stale child comments or state.
+    """
+
+    if ticket.type != "INC":
+        return []
+    return [
+        _relationship_snapshot(child_id, include_close_notes=True)
+        for child_id in ticket.child_ids
+        if child_id in MOCK_DB and MOCK_DB[child_id].type == "INC"
+    ]
 
 
 def _enrich_relationship_topology() -> None:
@@ -588,6 +712,7 @@ def _enrich_relationship_topology() -> None:
         ticket.originating_tickets = []
         ticket.child_incs = []
         ticket.child_incidents = []
+        ticket.child_tickets = []
         ticket.linked_prb = None
         ticket.linked_chg = None
 
@@ -595,6 +720,9 @@ def _enrich_relationship_topology() -> None:
             if explicit_parent:
                 ticket.parent_incident = explicit_parent
                 ticket.parent_inc = explicit_parent
+            elif ticket.parent_id in MOCK_DB:
+                ticket.parent_incident = _relationship_snapshot(ticket.parent_id)
+                ticket.parent_inc = ticket.parent_incident
             elif ticket.parent_incident_id in MOCK_DB:
                 ticket.parent_incident = _relationship_snapshot(ticket.parent_incident_id)
                 # parent_inc is retained as a transition alias for existing consumers.
@@ -604,14 +732,16 @@ def _enrich_relationship_topology() -> None:
             if explicit_children and ticket.parent_incident is None:
                 ticket.child_incs = explicit_children
                 ticket.child_incidents = explicit_children
-            elif ticket.child_incident_ids and ticket.parent_incident is None:
-                children = [
-                    _relationship_snapshot(child_id, include_close_notes=True)
-                    for child_id in ticket.child_incident_ids
-                    if child_id in MOCK_DB and MOCK_DB[child_id].type == "INC"
-                ]
+            elif ticket.child_ids and ticket.parent_incident is None:
+                children = resolve_child_tickets(ticket)
                 ticket.child_incs = children
                 ticket.child_incidents = children
+                ticket.child_tickets = children
+            elif ticket.child_incident_ids and ticket.parent_incident is None:
+                children = resolve_child_tickets(ticket)
+                ticket.child_incs = children
+                ticket.child_incidents = children
+                ticket.child_tickets = children
             if ticket.linked_problem in MOCK_DB:
                 ticket.linked_prb = _relationship_snapshot(ticket.linked_problem)
             if ticket.linked_change in MOCK_DB:

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
-from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color
+from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color, resolve_child_tickets
 from .rag_engine import query_hybrid_rag
 
 
@@ -35,12 +35,19 @@ def classify_breach_reason(ticket: Ticket) -> str:
 
 
 def ticket_payload(ticket: Ticket) -> dict:
-    return {
+    payload = {
         **ticket.model_dump(),
         "health_color": calculate_health_color(ticket),
         "customer_sentiment": calculate_customer_sentiment(ticket),
         "breach_reason": classify_breach_reason(ticket) if ticket.is_breached else None,
     }
+    if ticket.type == "INC":
+        children = resolve_child_tickets(ticket)
+        # Keep the previous field as a compatibility alias while clients move
+        # to child_tickets. Both are hydrated from the same canonical records.
+        payload["child_tickets"] = children
+        payload["child_incidents"] = children
+    return payload
 
 
 def calculate_customer_sentiment(ticket: Ticket) -> dict[str, object]:
@@ -104,7 +111,7 @@ def topology_payload(ticket: Ticket) -> dict[str, object]:
         "record_type": ticket.type,
         "current_ticket": {"number": ticket.number, "short_description": ticket.short_description, "state": ticket.state, "type": ticket.type},
         "parent_incident": ticket.parent_incident if ticket.type == "INC" else None,
-        "child_incidents": ticket.child_incidents if ticket.type == "INC" else [],
+        "child_incidents": resolve_child_tickets(ticket) if ticket.type == "INC" else [],
         "linked_prb": ticket.linked_prb if ticket.type == "INC" else None,
         "originating_tickets": ticket.originating_tickets if ticket.type in {"CHG", "PRB"} else [],
         "ctasks": ticket.ctasks if ticket.type == "CHG" else [],
@@ -203,7 +210,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
 
     if query.action == "generate_rca" or rca_intent:
         action = "generate_rca"
-        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "PRB" else "PRB0019201"
+        normalized_id = found_id if found_id and MOCK_DB[found_id].type == "PRB" else "PRB0031022"
     elif query.action == "generate_cr" or cr_intent:
         action = "generate_cr"
         normalized_id = found_id if found_id and MOCK_DB[found_id].type == "CHG" else "CHG0092100"

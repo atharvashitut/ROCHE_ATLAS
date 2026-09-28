@@ -33,11 +33,11 @@ KNOWLEDGE_CORPUS: list[dict[str, str]] = [
     },
     {
         "id": "ALM-DEF-8812",
-        "title": "Known Defect: SolMan Redundant Alert Suppression in SAP EWM 1010",
+        "title": "Known Defect: SAP PLM Classification and SolMan Alert Synchronization",
         "system": "HP ALM",
         "connector": "HP ALM",
         "url": "https://alm.roche.com/qcbin/defect/8812",
-        "content": "SolMan monitoring defect, redundant SAP EWM 1010 alert suppression and job-monitoring triage guidance.",
+        "content": "SAP PLM classification synchronization defect, SolMan alert suppression, SAP EWM 1010 monitoring, and job-monitoring triage guidance.",
     },
     {
         "id": "GDRIVE-SUD-109",
@@ -46,6 +46,30 @@ KNOWLEDGE_CORPUS: list[dict[str, str]] = [
         "connector": "Google Drive",
         "url": "https://drive.google.com/file/d/SUD-109-ARCH",
         "content": "SAP MM purchase order release workflow, integration architecture, approval routing and diagnostic handover information.",
+    },
+    {
+        "id": "KB0062011",
+        "title": "SAP PLM EHS Classification Synchronization Recovery",
+        "system": "ServiceNow",
+        "connector": "ServiceNow",
+        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KB0062011",
+        "content": "SAP PLM EHS specification, Material Master classification, mapping validation, and controlled recovery checks.",
+    },
+    {
+        "id": "VEEVA-SPEC-0099",
+        "title": "Controlled EHS Specification Synchronization Procedure",
+        "system": "Veeva Vault",
+        "connector": "Veeva Vault",
+        "url": "https://roche.veevavault.com/documents/VEEVA-SPEC-0099",
+        "content": "GxP-controlled SAP PLM EHS specification and Material Master classification reconciliation procedure.",
+    },
+    {
+        "id": "GDRIVE-SUD-311",
+        "title": "SAP PLM to Material Master Classification Integration Architecture",
+        "system": "Google Drive",
+        "connector": "Google Drive",
+        "url": "https://drive.google.com/file/d/GDRIVE-SUD-311",
+        "content": "System understanding document for SAP PLM, MM classification mappings, payload flow, and L2 support handover.",
     },
 ]
 
@@ -77,13 +101,16 @@ def _tokens(text: str) -> set[str]:
 def _ticket_chunk(ticket: Ticket) -> dict[str, str]:
     comments = " ".join(entry.value for entry in ticket.comments)
     work_notes = " ".join(entry.value for entry in ticket.work_notes)
+    references = " ".join(" ".join(reference.values()) for reference in ticket.knowledge_refs)
+    resources = " ".join(ticket.resources.values())
     return {
         "id": ticket.number,
         "title": ticket.short_description,
         "system": "ServiceNow Ticket",
         "connector": "ServiceNow",
         "url": f"/api/tickets/{ticket.number}",
-        "content": " ".join([ticket.description, ticket.ai_resolution_guide, comments, work_notes]),
+        "content": " ".join([ticket.short_description, ticket.description, ticket.ai_resolution_guide, comments, work_notes, references, resources]),
+        "is_known_issue": str(ticket.is_known_issue).lower(),
     }
 
 
@@ -120,6 +147,24 @@ def retrieve_multi_tool_context(query_text: str) -> list[dict[str, str]]:
 
 def _sources(chunks: list[dict[str, str]]) -> list[dict[str, str]]:
     return [{key: chunk[key] for key in ("id", "title", "system", "url")} for chunk in chunks]
+
+
+def _targets_unmapped_issue(query_text: str) -> bool:
+    """Identify explicit zero-day signatures before broad keyword retrieval.
+
+    An unknown error code must not be accidentally grounded on a different
+    record merely because both descriptions include generic words such as
+    "sync" or "failure".
+    """
+
+    signatures = re.findall(r"[a-z]+[_-]\d+[a-z0-9_-]*|\b\d{4,}\b", query_text.casefold())
+    for ticket in MOCK_DB.values():
+        if ticket.is_known_issue:
+            continue
+        searchable = f"{ticket.number} {ticket.short_description} {ticket.description}".casefold()
+        if any(signature in searchable for signature in signatures):
+            return True
+    return False
 
 
 def _grounded_prompt(query_text: str, chunks: list[dict[str, str]]) -> str:
@@ -164,7 +209,10 @@ def _local_reasoning_answer(query_text: str) -> str:
 def query_hybrid_rag(query_text: str) -> dict[str, Any]:
     """Use internal multi-tool RAG when matched; otherwise invoke Gemini ITIL reasoning."""
 
-    chunks = retrieve_multi_tool_context(query_text)
+    chunks = [] if _targets_unmapped_issue(query_text) else retrieve_multi_tool_context(query_text)
+    # A ticket explicitly marked as a zero-day must take the parametric ITIL
+    # reasoning route instead of appearing as a false grounded match.
+    chunks = [chunk for chunk in chunks if chunk.get("is_known_issue", "true") != "false"]
     has_internal_match = bool(chunks)
     prompt = _grounded_prompt(query_text, chunks) if has_internal_match else _reasoning_prompt(query_text)
     answer = _local_grounded_answer(query_text, chunks) if has_internal_match else _local_reasoning_answer(query_text)
