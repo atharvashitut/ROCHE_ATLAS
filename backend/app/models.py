@@ -326,7 +326,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
         priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", is_breached=True, on_hold_reason=None, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
-        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress", "comments": [{"id": "inc48103-child-01", "author": "Elena Martins", "role": "Requester", "timestamp": "2026-09-23 08:35:00", "text": "Child ticket update: Operations users still cannot refresh their warehouse sign-in token."}, {"id": "inc48103-child-02", "author": "Alex Rivera", "role": "L2 Support", "timestamp": "2026-09-23 09:05:00", "text": "Identity monitoring check completed; the failure correlates with the active qRFC recovery window."}, {"id": "inc48103-child-03", "author": "ATLAS Monitoring", "role": "System", "timestamp": "2026-09-23 10:20:00", "text": "Child ticket update: Local queue cleared on node 02; token refresh validation remains in progress."}]}], linked_problem="PRB0019201", linked_change="CHG0092100",
+        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress", "comments": [{"id": "inc48103-child-01", "author": "Elena Martins", "role": "Requester", "timestamp": "2026-09-23 08:35:00", "text": "Child ticket update: Operations users still cannot refresh their warehouse sign-in token."}, {"id": "inc48103-child-02", "author": "Alex Rivera", "role": "L2 Support", "timestamp": "2026-09-23 09:05:00", "text": "Identity monitoring check completed; the failure correlates with the active qRFC recovery window."}]}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
         comments=[
@@ -546,6 +546,12 @@ MOCK_DB: dict[str, Ticket] = {
 }
 
 
+def _is_human_child_comment(comment: dict[str, object]) -> bool:
+    role = str(comment.get("role", ""))
+    author = str(comment.get("author", ""))
+    return role != "System" and "system" not in author.lower() and "atlas monitoring" not in author.lower()
+
+
 def _child_ticket_comments(ticket: Ticket) -> list[dict[str, str]]:
     """Publish child-ticket journals in the compact drawer-specific shape."""
 
@@ -558,6 +564,7 @@ def _child_ticket_comments(ticket: Ticket) -> list[dict[str, str]]:
             "text": entry.value,
         }
         for entry in ticket.comments
+        if "system" not in entry.sys_created_by.lower() and "atlas monitoring" not in entry.sys_created_by.lower()
     ]
 
 
@@ -593,7 +600,10 @@ def _enrich_relationship_topology() -> None:
         # Reset display relationships so legacy links cannot leak into an invalid graph.
         explicit_parent = ticket.parent_incident
         explicit_originating = ticket.originating_tickets.copy()
-        explicit_children = ticket.child_incidents.copy()
+        explicit_children = [
+            {**child, "comments": [comment for comment in child.get("comments", []) if _is_human_child_comment(comment)]}
+            for child in ticket.child_incidents
+        ]
         ticket.parent_inc = None
         ticket.originating_tickets = []
         ticket.child_incs = []
