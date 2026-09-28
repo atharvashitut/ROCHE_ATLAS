@@ -326,7 +326,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
         priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", is_breached=True, on_hold_reason=None, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
-        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
+        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}, {"sys_id": "sys_inc_x", "number": "INC0048109", "short_description": "Warehouse scanners unable to post goods issue", "state": "New"}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
         comments=[

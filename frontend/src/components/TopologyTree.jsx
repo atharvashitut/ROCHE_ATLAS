@@ -4,7 +4,7 @@ import WorkItemActivities from './WorkItemActivities'
 const phaseMaps = { CHG: ['New', 'Assess', 'Authorize', 'Schedule', 'Implement', 'Review', 'Closed'], PRB: ['New', 'Assess', 'RCA', 'QA', 'Review', 'Closed'] }
 const closedStates = new Set(['Closed', 'Resolved', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped'])
 const taskTypes = new Set(['CTASK', 'PTASK', 'SCTASK'])
-const ctaskStateStyles = { 'Closed Complete': 'bg-emerald-500/20 text-emerald-200', Open: 'bg-cyan-500/20 text-cyan-200', Pending: 'bg-amber-500/20 text-amber-200' }
+const ctaskStateStyles = { 'Closed Complete': 'bg-emerald-500/20 text-emerald-200', Open: 'bg-cyan-500/20 text-cyan-200', Pending: 'bg-slate-700 text-slate-200' }
 
 function nodeType(node) {
   if (node.type) return node.type
@@ -32,7 +32,7 @@ function InspectorDrawer({ node, onClose }) {
 }
 
 function TopologyNode({ label, node, onSelectTicket, tone = 'slate' }) {
-  const colors = { cyan: 'border-cyan-500/50 bg-cyan-500/10 text-cyan-100', indigo: 'border-indigo-500/50 bg-indigo-500/10 text-indigo-100', amber: 'border-amber-500/50 bg-amber-500/10 text-amber-100', emerald: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100', slate: 'border-slate-600 bg-slate-800 text-slate-100' }
+  const colors = { cyan: 'border-cyan-500/50 bg-cyan-500/10 text-cyan-100', indigo: 'border-indigo-500/50 bg-indigo-500/10 text-indigo-100', amber: 'border-indigo-500/50 bg-indigo-500/10 text-indigo-100', emerald: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100', slate: 'border-slate-600 bg-slate-800 text-slate-100' }
   const isCTask = nodeType(node) === 'CTASK'
   return <button type="button" onClick={() => onSelectTicket(node.number, node)} className={`max-w-56 rounded-lg border px-3 py-2 text-left text-xs shadow-sm transition hover:brightness-125 ${colors[tone]}`}><span className="block font-mono text-[10px] opacity-80">{label} · {node.number}</span><span className="mt-1 block font-semibold">{node.short_description || node.title}</span>{isCTask ? <span className={`mt-2 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${ctaskStateStyles[node.state] || 'bg-slate-700 text-slate-200'}`}>{node.state}</span> : node.state && <span className="mt-1 block text-[10px] opacity-70">{node.state}</span>}</button>
 }
@@ -80,5 +80,5 @@ export default function TopologyTree({ ticket, onSelectTicket }) {
     else setInspectedNode(node)
   }
   const graph = type === 'INC' ? <IncidentGraph ticket={ticket} onSelectTicket={selectNode} /> : type === 'CHG' ? <ChangeGraph ticket={ticket} onSelectTicket={selectNode} /> : type === 'PRB' ? <ProblemGraph ticket={ticket} onSelectTicket={selectNode} /> : <GenericGraph ticket={ticket} onSelectTicket={selectNode} />
-  return <section className="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><p className="mb-1 text-xs font-semibold uppercase tracking-wider text-cyan-300">Relational topology tree</p><p className="mb-4 text-xs text-slate-500">{type} relationship view</p><div className="overflow-x-auto"><div className="flex min-w-max items-center gap-3">{graph}</div></div><p className="mt-3 text-xs text-slate-500">Select a ticket node to load its complete ServiceNow record; task nodes open their local task details.</p>{inspectedNode && <InspectorDrawer node={inspectedNode} onClose={() => setInspectedNode(null)} />}</section>
+  return <section className="rounded-xl border border-slate-700 bg-slate-950/60 p-4"><p className="mb-1 text-xs font-semibold uppercase tracking-wider text-cyan-300">Relational Topology &amp; Linked Tickets</p><p className="mb-4 text-xs text-slate-500">{type} relationship view</p><div className="overflow-x-auto"><div className="flex min-w-max items-center gap-3">{graph}</div></div><p className="mt-3 text-xs text-slate-500">Select a ticket node to load its complete ServiceNow record; task nodes open their local task details.</p>{inspectedNode && <InspectorDrawer node={inspectedNode} onClose={() => setInspectedNode(null)} />}</section>
 }
