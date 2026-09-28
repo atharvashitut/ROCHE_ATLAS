@@ -51,6 +51,15 @@ class ServiceNowJournalEntry(BaseModel):
     is_customer: bool
 
 
+class TicketAttachment(BaseModel):
+    """An openable evidence file linked to a ServiceNow record."""
+
+    filename: str
+    content_type: str
+    size: str
+    url: str
+
+
 class Ticket(BaseModel):
     """A common ticket shape with metrics applicable to its ServiceNow type."""
 
@@ -97,6 +106,7 @@ class Ticket(BaseModel):
     prb_phase: str | None = None
     work_notes: list[ServiceNowJournalEntry] = Field(default_factory=list)
     comments: list[ServiceNowJournalEntry] = Field(default_factory=list)
+    attachments: list[TicketAttachment] = Field(default_factory=list)
     additional_comments: list[str] = Field(default_factory=list)
     ctasks: list[dict[str, object]] = Field(default_factory=list)
     ptasks: list[dict[str, object]] = Field(default_factory=list)
@@ -321,6 +331,10 @@ MOCK_DB: dict[str, Ticket] = {
             {"sys_id": "f3f59c2a7f574d148483000000000005", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 11:10:00", "value": "Warehouse shift is ending in 1 hour. Can we get an ETA on the emergency patch deployment?", "is_customer": True},
             {"sys_id": "f3f59c2a7f574d148483000000000006", "element": "comments", "sys_created_by": "Maya Chen", "sys_created_on": "2026-09-23 11:15:00", "value": "Emergency patch CHG0092100 is approved and CTASK001 pre-patch backup is complete. Proceeding with qRFC queue unlock.", "is_customer": False},
         ],
+        attachments=[
+            {"filename": "qRFC_remediation_checklist.pdf", "content_type": "application/pdf", "size": "248 KB", "url": "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf"},
+            {"filename": "sap_sm12_queue_lock_error.png", "content_type": "image/svg+xml", "size": "1.4 MB", "url": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='675'%3E%3Crect width='100%25' height='100%25' fill='%230f172a'/%3E%3Ctext x='70' y='130' fill='%2367e8f9' font-size='42' font-family='Arial'%3ESAP SM12 Queue Lock Evidence%3C/text%3E%3Ctext x='70' y='220' fill='%23e2e8f0' font-size='28' font-family='Arial'%3ELock owner: EWM_QRFC_REPL%3C/text%3E%3Ctext x='70' y='275' fill='%23fda4af' font-size='28' font-family='Arial'%3EStatus: Queue lock detected%3C/text%3E%3C/svg%3E"},
+        ],
         resources={"KBA": "KBA-ATLAS-1042 — Desktop client authentication recovery", "Veeva": "Veeva Vault / Quality / ATLAS-Auth-Investigation", "GDrive": "ATLAS / Major Incidents / INC0048102"},
     ),
     "RITM0094101": Ticket(
@@ -420,6 +434,9 @@ MOCK_DB: dict[str, Ticket] = {
         similar_records=[{"id": "PRB0018992", "score": 95, "title": "Historical Root Cause: PO Release Strategy Config Corruption", "state": "Closed", "resolution_date": "Last Month"}],
         historical_tickets=[{"id": "INC0042911", "title": "PO Release Strategy sync failure", "resolution_date": "3 months ago", "close_notes_snippet": "Restarted the PO release workflow in SWPR. Users were able to approve immediately after.", "relevance_score": 82}],
         comments=_journal_thread("INC0048110", requester="Mark Vance", l1_support="Procurement Service Desk", l2_support="Nina Keller", initial_report="Purchase orders are stuck in the SAP MM approval workflow and cannot be released to suppliers.", monitoring_check="L1 reviewed workflow logs and found the affected purchasing organization differs from the working template.", business_impact="Urgent purchase orders are waiting for approval and buyers are escalating before the supplier cut-off.", diagnostic_update="SAP MM L2 isolated a missing substitution rule and is awaiting the controlled change needed for the purchasing-organization configuration."),
+        attachments=[
+            {"filename": "po_release_authorization_failure.png", "content_type": "image/svg+xml", "size": "876 KB", "url": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='1200' height='675'%3E%3Crect width='100%25' height='100%25' fill='%230f172a'/%3E%3Ctext x='70' y='130' fill='%2367e8f9' font-size='42' font-family='Arial'%3ESAP MM PO Release Authorization Failure%3C/text%3E%3Ctext x='70' y='220' fill='%23e2e8f0' font-size='28' font-family='Arial'%3EPurchasing org: 1010%3C/text%3E%3Ctext x='70' y='275' fill='%23fda4af' font-size='28' font-family='Arial'%3EMissing substitution rule%3C/text%3E%3C/svg%3E"},
+        ],
         resources={"KBA": "KBA-SAP-MM-118 — PO workflow release diagnosis", "Veeva": "Veeva Vault / Procurement / MM-Workflow-SOP", "GDrive": "ATLAS / SAP KT Hub / MM / PO-workflow-SUD.pptx"},
     ),
     "INC0048111": Ticket(
