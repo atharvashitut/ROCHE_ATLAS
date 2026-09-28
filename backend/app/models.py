@@ -326,7 +326,7 @@ MOCK_DB: dict[str, Ticket] = {
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
         priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support", is_breached=True, on_hold_reason=None, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
-        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress"}], linked_problem="PRB0019201", linked_change="CHG0092100",
+        child_incidents=[{"sys_id": "sys_inc_2", "number": "INC0048103", "short_description": "Token refresh failure for operations users", "state": "In Progress", "comments": [{"id": "inc48103-child-01", "author": "Elena Martins", "role": "Requester", "timestamp": "2026-09-23 08:35:00", "text": "Child ticket update: Operations users still cannot refresh their warehouse sign-in token."}, {"id": "inc48103-child-02", "author": "Alex Rivera", "role": "L2 Support", "timestamp": "2026-09-23 09:05:00", "text": "Identity monitoring check completed; the failure correlates with the active qRFC recovery window."}, {"id": "inc48103-child-03", "author": "ATLAS Monitoring", "role": "System", "timestamp": "2026-09-23 10:20:00", "text": "Child ticket update: Local queue cleared on node 02; token refresh validation remains in progress."}]}], linked_problem="PRB0019201", linked_change="CHG0092100",
         latest_work_notes="SAP EWM support isolated a stuck qRFC queue owner after the replication job retry.",
         closure_notes="Pending validated queue unlock and confirmation from warehouse operations.",
         comments=[
@@ -546,7 +546,22 @@ MOCK_DB: dict[str, Ticket] = {
 }
 
 
-def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) -> dict[str, object]:
+def _child_ticket_comments(ticket: Ticket) -> list[dict[str, str]]:
+    """Publish child-ticket journals in the compact drawer-specific shape."""
+
+    return [
+        {
+            "id": entry.sys_id,
+            "author": entry.sys_created_by,
+            "role": "Requester" if entry.is_customer else "L2 Support",
+            "timestamp": entry.sys_created_on,
+            "text": entry.value,
+        }
+        for entry in ticket.comments
+    ]
+
+
+def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False, include_child_journal: bool = False) -> dict[str, object]:
     ticket = MOCK_DB[ticket_id]
     snapshot = {
         "sys_id": ticket.sys_id,
@@ -556,7 +571,7 @@ def _relationship_snapshot(ticket_id: str, include_close_notes: bool = False) ->
         "state": ticket.state,
         "type": ticket.type,
         "latest_note": ticket.work_notes[-1].value,
-        "comments": ticket.comments,
+        "comments": _child_ticket_comments(ticket) if include_child_journal else ticket.comments,
         "additional_comments": ticket.additional_comments,
         "ctasks": ticket.ctasks,
         "ptasks": ticket.ptasks,
@@ -601,7 +616,7 @@ def _enrich_relationship_topology() -> None:
                 ticket.child_incidents = explicit_children
             elif ticket.child_incident_ids and ticket.parent_incident is None:
                 children = [
-                    _relationship_snapshot(child_id, include_close_notes=True)
+                    _relationship_snapshot(child_id, include_close_notes=True, include_child_journal=True)
                     for child_id in ticket.child_incident_ids
                     if child_id in MOCK_DB and MOCK_DB[child_id].type == "INC"
                 ]
