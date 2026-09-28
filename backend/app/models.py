@@ -261,6 +261,12 @@ def _knowledge_references(number: str, title: str) -> list[dict[str, str]]:
             "summary": "Approved quality and compliance controls to apply while resolving this work item.",
         },
         {
+            "source_type": "HP ALM Defect",
+            "title": f"HP ALM Quality Center — Related defect analysis for {number}",
+            "path_or_url": f"https://alm.roche.com/qcbin/defects?related_record={number}",
+            "summary": "Related defect evidence, test execution history, and release-quality impact for this work item.",
+        },
+        {
             "source_type": "Google Drive KT/SUD Hub",
             "title": f"{number} KT Video Recording and SUD walkthrough PPT",
             "path_or_url": f"Google Drive / ATLAS / KT Hub / {number} / SUD-walkthrough.pptx | KT-video-recording",

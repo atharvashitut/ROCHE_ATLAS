@@ -13,7 +13,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 from .models import ALL_ASSIGNMENT_GROUPS, MOCK_DB, Ticket, calculate_health_color
-from .rag_engine import query_chatgpt_rag
+from .rag_engine import query_hybrid_rag
 
 
 class ChatQuery(BaseModel):
@@ -212,7 +212,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         normalized_id = found_id
 
     normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
-    rag_result = query_chatgpt_rag(query.message)
+    rag_result = query_hybrid_rag(query.message)
     response = chat_response(normalized_query)
     ticket = MOCK_DB.get(normalized_id) if normalized_id else None
     if action == "chat":
@@ -233,6 +233,8 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "topology": topology_payload(ticket) if ticket else None,
         "sources": rag_result["sources"],
         "model_used": rag_result["model_used"],
+        "fallback_reasoning": rag_result["fallback_reasoning"],
+        "retrieval_route": rag_result["retrieval_route"],
     }
 
 
