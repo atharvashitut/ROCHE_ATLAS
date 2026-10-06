@@ -46,12 +46,14 @@ export default function Dashboard() {
   const [groupSearch, setGroupSearch] = useState('')
   const [groupMenuOpen, setGroupMenuOpen] = useState(false)
   const [activeType, setActiveType] = useState('ALL')
-  const [assignee, setAssignee] = useState('All')
+  const [selectedAssignees, setSelectedAssignees] = useState(() => new Set())
+  const [assigneeMenuOpen, setAssigneeMenuOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState(null)
   const [detailError, setDetailError] = useState('')
   const groupControlRef = useRef(null)
+  const assigneeControlRef = useRef(null)
 
   useEffect(() => {
     let active = true
@@ -61,6 +63,7 @@ export default function Dashboard() {
         setTickets(ticketResult.tickets)
         setAssignmentGroups(groupResult.assignment_groups)
         setSelectedGroups(new Set(groupResult.assignment_groups))
+        setSelectedAssignees(new Set(ticketResult.tickets.map((ticket) => ticket.assignee)))
       })
       .catch((requestError) => active && setError(requestError.message))
       .finally(() => active && setLoading(false))
@@ -69,21 +72,22 @@ export default function Dashboard() {
 
   useEffect(() => {
     const closeOnEscape = (event) => event.key === 'Escape' && setSelected(null)
-    const closeGroupMenu = (event) => {
+    const closeFilterMenus = (event) => {
       if (groupControlRef.current && !groupControlRef.current.contains(event.target)) setGroupMenuOpen(false)
+      if (assigneeControlRef.current && !assigneeControlRef.current.contains(event.target)) setAssigneeMenuOpen(false)
     }
     window.addEventListener('keydown', closeOnEscape)
-    window.addEventListener('mousedown', closeGroupMenu)
-    return () => { window.removeEventListener('keydown', closeOnEscape); window.removeEventListener('mousedown', closeGroupMenu) }
+    window.addEventListener('mousedown', closeFilterMenus)
+    return () => { window.removeEventListener('keydown', closeOnEscape); window.removeEventListener('mousedown', closeFilterMenus) }
   }, [])
 
-  const assignees = useMemo(() => ['All', ...new Set(tickets.map((ticket) => ticket.assignee))], [tickets])
+  const assignees = useMemo(() => [...new Set(tickets.map((ticket) => ticket.assignee))].sort(), [tickets])
   const matchingGroups = useMemo(() => assignmentGroups.filter((group) => group.toLowerCase().includes(groupSearch.trim().toLowerCase())), [assignmentGroups, groupSearch])
   const visibleTickets = useMemo(() => tickets.filter((ticket) => (
     selectedGroups.has(ticket.assignment_group)
     && (activeType === 'ALL' || ticket.type === activeType)
-    && (assignee === 'All' || ticket.assignee === assignee)
-  )), [activeType, assignee, selectedGroups, tickets])
+    && selectedAssignees.has(ticket.assignee)
+  )), [activeType, selectedAssignees, selectedGroups, tickets])
 
   function toggleGroup(group) {
     setSelectedGroups((current) => {
@@ -98,6 +102,19 @@ export default function Dashboard() {
     setSelectedGroups(new Set(MY_TEAM_GROUPS))
     setGroupSearch('')
   }
+
+  function selectAllGroups() { setSelectedGroups(new Set(assignmentGroups)) }
+  function deselectAllGroups() { setSelectedGroups(new Set()) }
+  function toggleAssignee(name) {
+    setSelectedAssignees((current) => {
+      const next = new Set(current)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
+  function selectAllAssignees() { setSelectedAssignees(new Set(assignees)) }
+  function deselectAllAssignees() { setSelectedAssignees(new Set()) }
 
   async function openTicket(ticketId) {
     setDetailError('')
@@ -120,8 +137,8 @@ export default function Dashboard() {
     <div className="apple-hero mb-8"><p className="text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">IT service intelligence</p><h1 className="mt-3 text-4xl font-semibold tracking-tight">Operations, clarified.</h1><p className="mt-3 max-w-2xl text-slate-400">A single, focused view of active IT work—prioritized for timely decisions and confident action.</p></div>
     <div className="apple-type-tabs mb-6 flex flex-wrap gap-2 border-b border-slate-800 pb-4" role="tablist" aria-label="Ticket type">{typeTabs.map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={activeType === tab.id} onClick={() => setActiveType(tab.id)} className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${activeType === tab.id ? 'monday-primary' : 'bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white'}`}>{tab.label}</button>)}</div>
     <div className="apple-filter mb-4 flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-5 lg:flex-row lg:items-end">
-      <div ref={groupControlRef} className="relative min-w-0 flex-1"><div className="mb-2 flex items-center justify-between gap-3"><label htmlFor="assignment-group-search" className="text-xs font-semibold uppercase tracking-wider text-slate-400">Assignment Group Search</label><button type="button" onClick={selectMyTeams} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">Select My Teams</button></div><input id="assignment-group-search" value={groupSearch} onFocus={() => setGroupMenuOpen(true)} onChange={(event) => { setGroupSearch(event.target.value); setGroupMenuOpen(true) }} placeholder="Search 20 enterprise assignment groups…" aria-expanded={groupMenuOpen} aria-controls="assignment-group-menu" className="w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400" />{groupMenuOpen && <div id="assignment-group-menu" className="absolute z-30 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-2 shadow-2xl shadow-slate-950/50">{matchingGroups.length ? matchingGroups.map((group) => <label key={group} className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><input type="checkbox" checked={selectedGroups.has(group)} onChange={() => toggleGroup(group)} className="h-4 w-4 accent-cyan-400" />{group}</label>) : <p className="px-3 py-2 text-sm text-slate-500">No assignment groups match that search.</p>}</div>}</div>
-      <label className="text-sm text-slate-300 lg:w-56">Assignee <select value={assignee} onChange={(event) => setAssignee(event.target.value)} className="mt-2 block w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-slate-100">{assignees.map((name) => <option key={name}>{name}</option>)}</select></label>
+      <div ref={groupControlRef} className="relative min-w-0 flex-1"><div className="mb-2 flex items-center justify-between gap-3"><label htmlFor="assignment-group-search" className="text-xs font-semibold uppercase tracking-wider text-slate-400">Assignment Group Search</label><div className="flex gap-3"><button type="button" onClick={selectAllGroups} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">Select All</button><button type="button" onClick={deselectAllGroups} className="text-xs font-semibold text-slate-400 hover:text-slate-100">Deselect All</button><button type="button" onClick={selectMyTeams} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">My Teams</button></div></div><input id="assignment-group-search" value={groupSearch} onFocus={() => setGroupMenuOpen(true)} onChange={(event) => { setGroupSearch(event.target.value); setGroupMenuOpen(true) }} placeholder="Search enterprise assignment groups…" aria-expanded={groupMenuOpen} aria-controls="assignment-group-menu" className="w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400" />{groupMenuOpen && <div id="assignment-group-menu" className="absolute z-30 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-2 shadow-2xl shadow-slate-950/50">{matchingGroups.length ? matchingGroups.map((group) => <label key={group} className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><input type="checkbox" checked={selectedGroups.has(group)} onChange={() => toggleGroup(group)} className="h-4 w-4 accent-cyan-400" />{group}</label>) : <p className="px-3 py-2 text-sm text-slate-500">No assignment groups match that search.</p>}</div>}</div>
+      <div ref={assigneeControlRef} className="relative min-w-0 lg:w-72"><div className="mb-2 flex items-center justify-between gap-3"><p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Assignees</p><div className="flex gap-3"><button type="button" onClick={selectAllAssignees} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">Select All</button><button type="button" onClick={deselectAllAssignees} className="text-xs font-semibold text-slate-400 hover:text-slate-100">Deselect All</button></div></div><button type="button" onClick={() => setAssigneeMenuOpen((open) => !open)} aria-expanded={assigneeMenuOpen} className="flex w-full items-center justify-between rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-left text-sm text-slate-100 hover:border-cyan-400"><span>{selectedAssignees.size === assignees.length ? 'All assignees' : `${selectedAssignees.size} assignee${selectedAssignees.size === 1 ? '' : 's'} selected`}</span><span className="text-cyan-300">⌄</span></button>{assigneeMenuOpen && <div className="absolute z-30 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-2 shadow-2xl shadow-slate-950/50 custom-scrollbar">{assignees.map((name) => <label key={name} className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><input type="checkbox" checked={selectedAssignees.has(name)} onChange={() => toggleAssignee(name)} className="h-4 w-4 accent-cyan-400" />{name}</label>)}</div>}</div>
     </div>
     <div className="mb-7 flex flex-wrap gap-2" aria-label="Selected assignment groups">{[...selectedGroups].map((group) => <button key={group} type="button" onClick={() => toggleGroup(group)} className="apple-chip rounded-full border border-cyan-500/50 bg-cyan-500/10 px-3 py-1.5 text-sm text-cyan-100 transition-colors hover:bg-cyan-500/20 hover:text-cyan-100">{group} <span aria-hidden="true">×</span><span className="sr-only">Remove {group}</span></button>)}{selectedGroups.size === 0 && <p className="py-1 text-sm text-amber-200">Select one or more assignment groups to populate the queue.</p>}</div>
     {loading && <p className="rounded-xl border border-slate-700 p-6 text-slate-400">Loading active tickets…</p>}{error && <p className="rounded-xl border border-rose-500/40 bg-rose-950/30 p-4 text-rose-200" role="alert">Unable to load tickets: {error}</p>}

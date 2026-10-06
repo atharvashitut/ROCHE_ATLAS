@@ -21,6 +21,16 @@ export async function fetchAssignmentGroups() {
   return request('/dashboard/assignment-groups')
 }
 
+export async function fetchDashboardStats({ assignmentGroups = [], groupFilterActive = false, startDate, endDate } = {}) {
+  const params = new URLSearchParams()
+  assignmentGroups.forEach((group) => params.append('assignment_group', group))
+  if (groupFilterActive) params.set('group_filter_active', 'true')
+  if (startDate) params.set('start_date', startDate)
+  if (endDate) params.set('end_date', endDate)
+  const query = params.toString()
+  return request(`/dashboard/stats${query ? `?${query}` : ''}`)
+}
+
 export async function fetchTicket(ticketId) {
   return request(`/tickets/${encodeURIComponent(ticketId)}`)
 }

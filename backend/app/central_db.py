@@ -150,6 +150,156 @@ CENTRAL_KNOWLEDGE_DB: tuple[CentralKnowledgeRecord, ...] = (
     },
 )
 
+# Dense, source-balanced corpus used by the local vector prototype.  Records
+# remain canonical here: the dashboard, ticket cards, and retrieval engine do
+# not maintain their own copies of citation metadata.
+CENTRAL_KNOWLEDGE_DB += (
+    {
+        "id": "KBA-MW-772",
+        "title": "SAP PI/PO Queue Retry and Heap-Dump Triage Runbook",
+        "source_type": "ServiceNow KBA",
+        "system": "ServiceNow",
+        "connector": "ServiceNow",
+        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KBA-MW-772",
+        "summary": "Evidence-preserving triage for SAP PI/PO queue backlogs, heap pressure, and retry control.",
+        "content": "SAP PI PO gateway message queue retry, Java heap dump collection, ERR_9921_SYNC_FAIL investigation, interface replay safety, and middleware escalation evidence.",
+        "ticket_numbers": ["INC0048130"],
+        "tags": ["sap", "po", "gateway", "memory", "heap", "queue", "retry", "middleware"],
+    },
+    {
+        "id": "KBA-BASIS-428",
+        "title": "SAP SM37 Batch Failure and SU53 Authorization Evidence Collection",
+        "source_type": "ServiceNow KBA",
+        "system": "ServiceNow",
+        "connector": "ServiceNow",
+        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KBA-BASIS-428",
+        "summary": "Runbook for technical-user job failures, authorization traces, and approved recovery validation.",
+        "content": "SAP SM37 batch job cancellation, SU53 authorization trace, technical user role validation, background job restart safeguards, SolMan monitoring, and audit evidence.",
+        "ticket_numbers": ["INC0048104", "INC0048120"],
+        "tags": ["sap", "basis", "sm37", "su53", "batch", "authorization", "solman"],
+    },
+    {
+        "id": "KBA-SD-519",
+        "title": "SAP SD-FI Billing Posting and Tax Determination Validation",
+        "source_type": "ServiceNow KBA",
+        "system": "ServiceNow",
+        "connector": "ServiceNow",
+        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KBA-SD-519",
+        "summary": "Controlled validation sequence for SD billing release, tax-code mapping, and FI posting recovery.",
+        "content": "SAP SD billing document block, FICO posting, tax code determination, account assignment mapping, transport validation, and finance reconciliation evidence.",
+        "ticket_numbers": ["INC0048110", "PRB0030991"],
+        "tags": ["sap", "sd", "fico", "billing", "tax", "posting", "finance"],
+    },
+    {
+        "id": "KBA-SEC-244",
+        "title": "GRC Emergency Role Assignment and Token Refresh Validation",
+        "source_type": "ServiceNow KBA",
+        "system": "ServiceNow",
+        "connector": "ServiceNow",
+        "url": "https://roche.service-now.com/kb_view.do?sysparm_article=KBA-SEC-244",
+        "summary": "Segregation-of-duties checks and validation for emergency SAP authorization corrections.",
+        "content": "SAP GRC emergency access, M_MSEG_LGO authorization, token refresh validation, role delta approval, audit logging, and warehouse mobility access control.",
+        "ticket_numbers": ["INC0048103", "PRB0031022", "CHG0092100"],
+        "tags": ["sap", "grc", "authorization", "token", "security", "m_mseg_lgo"],
+    },
+    {
+        "id": "VEEVA-SOP-0185",
+        "title": "GxP Change Control for SAP Interface and Master Data Remediation",
+        "source_type": "Veeva Vault SOP",
+        "system": "Veeva Vault",
+        "connector": "Veeva Vault",
+        "url": "https://roche.veevavault.com/documents/SOP-0185",
+        "summary": "Quality controls for approved interface changes, evidence capture, and rollback decisions.",
+        "content": "GxP change control for SAP integration remediation, controlled transport, approval matrix, rollback plan, test evidence, deviation assessment, and closure requirements.",
+        "ticket_numbers": ["CHG0092100", "INC0048110", "INC0048125"],
+        "tags": ["gxp", "change", "transport", "sap", "integration", "rollback", "validation"],
+    },
+    {
+        "id": "VEEVA-SOP-0261",
+        "title": "Warehouse Business Continuity for EWM Queue and RF Device Outages",
+        "source_type": "Veeva Vault SOP",
+        "system": "Veeva Vault",
+        "connector": "Veeva Vault",
+        "url": "https://roche.veevavault.com/documents/SOP-0261",
+        "summary": "Approved manual-contingency and recovery validation steps for EWM disruption scenarios.",
+        "content": "SAP EWM business continuity, qRFC queue lock, RF scanner outage, manual goods issue contingency, warehouse reconciliation, and recovery sign-off.",
+        "ticket_numbers": ["INC0048102", "INC0048109"],
+        "tags": ["sap", "ewm", "warehouse", "rf", "scanner", "qrfc", "continuity"],
+    },
+    {
+        "id": "VEEVA-SOP-0307",
+        "title": "Controlled Veeva Vault Access Fulfillment and Audit Verification",
+        "source_type": "Veeva Vault SOP",
+        "system": "Veeva Vault",
+        "connector": "Veeva Vault",
+        "url": "https://roche.veevavault.com/documents/SOP-0307",
+        "summary": "Controlled fulfilment procedure for regulated Vault role assignments and requester confirmation.",
+        "content": "Veeva Vault reviewer access, training verification, manager approval, role fulfilment, audit trail validation, and requester confirmation.",
+        "ticket_numbers": ["RITM0094102"],
+        "tags": ["veeva", "access", "role", "audit", "training", "fulfillment"],
+    },
+    {
+        "id": "ALM-DEF-9021",
+        "title": "Known Defect: SD-FI Tax Mapping Regression After Release Transport",
+        "source_type": "HP ALM Defect",
+        "system": "HP ALM",
+        "connector": "HP ALM",
+        "url": "https://alm.roche.com/qcbin/defect/9021",
+        "summary": "Release-quality evidence for a tax mapping regression affecting SD billing and FI posting.",
+        "content": "HP ALM defect for SAP SD FICO tax mapping regression, release transport impact, billing document posting block, regression test evidence, and corrective transport.",
+        "ticket_numbers": ["INC0048110", "PRB0030991"],
+        "tags": ["sap", "sd", "fico", "tax", "billing", "alm", "defect"],
+    },
+    {
+        "id": "ALM-DEF-9176",
+        "title": "Known Defect: NetWeaver RF Gateway Node 02 Connection Pool Leak",
+        "source_type": "HP ALM Defect",
+        "system": "HP ALM",
+        "connector": "HP ALM",
+        "url": "https://alm.roche.com/qcbin/defect/9176",
+        "summary": "Defect analysis and test evidence for intermittent RF gateway node connection failures.",
+        "content": "SAP NetWeaver RF gateway node 02, connection pool leak, ICM timeout, controlled restart, handheld connectivity test, and release defect evidence.",
+        "ticket_numbers": ["INC0048109"],
+        "tags": ["sap", "basis", "netweaver", "rf", "gateway", "timeout", "alm"],
+    },
+    {
+        "id": "ALM-DEF-9234",
+        "title": "Known Defect: SAP PO Heap Fragmentation During High-Volume Replay",
+        "source_type": "HP ALM Defect",
+        "system": "HP ALM",
+        "connector": "HP ALM",
+        "url": "https://alm.roche.com/qcbin/defect/9234",
+        "summary": "Known diagnostic pattern for SAP PO heap fragmentation during replay operations.",
+        "content": "SAP PO memory fragmentation, high-volume message replay, Java heap dump, gateway instability, error signature comparison, and safe replay throttling.",
+        "ticket_numbers": ["INC0048130"],
+        "tags": ["sap", "po", "memory", "heap", "gateway", "replay", "alm"],
+    },
+    {
+        "id": "GDRIVE-KT-442",
+        "title": "SAP EWM Major Incident: qRFC Recovery and Warehouse Validation Walkthrough",
+        "source_type": "Google Drive KT/SUD Hub",
+        "system": "Google Drive",
+        "connector": "Google Drive",
+        "url": "https://drive.google.com/file/d/GDRIVE-KT-442",
+        "summary": "L2/L3 knowledge-transfer walkthrough for qRFC, RF gateway, and post-recovery business validation.",
+        "content": "SAP EWM qRFC recovery KT video, SM12 lock owner, RF handheld validation, warehouse goods issue testing, batch authorization verification, and major incident handover.",
+        "ticket_numbers": ["INC0048102", "INC0048103", "INC0048109", "PRB0031022"],
+        "tags": ["sap", "ewm", "qrfc", "warehouse", "rf", "sm12", "kt"],
+    },
+    {
+        "id": "GDRIVE-SUD-508",
+        "title": "SAP PI/PO Integration Landscape, Interface Ownership, and Replay Guardrails",
+        "source_type": "Google Drive KT/SUD Hub",
+        "system": "Google Drive",
+        "connector": "Google Drive",
+        "url": "https://drive.google.com/file/d/GDRIVE-SUD-508",
+        "summary": "System-understanding document for PI/PO failure triage and message replay safety.",
+        "content": "SAP PI PO architecture, gateway interface ownership, retry queues, message replay guardrails, heap diagnostics, downstream dependency mapping, and support handover.",
+        "ticket_numbers": ["INC0048130"],
+        "tags": ["sap", "pi", "po", "gateway", "integration", "replay", "sud"],
+    },
+)
+
 class CentralTicketRepository:
     """The sole runtime record store for API, topology, and RAG reads.
 
@@ -211,6 +361,12 @@ def central_knowledge_documents() -> list[dict[str, str]]:
         {key: record[key] for key in ("id", "title", "system", "connector", "url", "content")}
         for record in CENTRAL_KNOWLEDGE_DB
     ]
+
+
+def central_knowledge_records() -> list[CentralKnowledgeRecord]:
+    """Return deep copies of canonical source records for connector ingestion."""
+
+    return deepcopy(list(CENTRAL_KNOWLEDGE_DB))
 
 
 def central_knowledge_references(ticket_number: str, title: str) -> list[dict[str, str]]:

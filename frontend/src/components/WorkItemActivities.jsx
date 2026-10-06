@@ -43,7 +43,46 @@ export function ChildIncidents({ incidents = [] }) {
   return <section className="apple-children rounded-xl border border-slate-700 bg-slate-950/40 p-4"><div className="flex items-center justify-between gap-3"><h3 className="apple-panel-title text-sm font-semibold">Child Tickets</h3><span className="apple-count">{incidents.length}</span></div><p className="apple-panel-subtitle mt-1 text-xs">Linked incident activity</p>{incidents.length ? <ul className="apple-child-list mt-3 max-h-64 space-y-3 overflow-y-auto pr-2 custom-scrollbar scrollbar-thin scrollbar-thumb-slate-700 scrollbar-track-transparent">{incidents.map((incident) => <ChildTicket key={incident.sys_id || incident.number} incident={incident} />)}</ul> : <p className="mt-3 text-sm text-slate-500">No child incidents linked to this record.</p>}</section>
 }
 
+function isClosedTask(task) {
+  return task.state === 'Closed' || task.state?.startsWith('Closed')
+}
+
+function latestTaskComment(task) {
+  return newestFirst((task.comments || []).filter(isHumanJournalEntry))[0]
+}
+
+export function TaskActivities({ ticket }) {
+  const isChange = ticket.type === 'CHG'
+  const tasks = isChange ? ticket.ctasks || [] : ticket.ptasks || []
+  const taskName = isChange ? 'Change Tasks' : 'Problem Tasks'
+
+  return <section className="apple-task-activity rounded-xl border border-slate-700 bg-slate-950/40 p-4">
+    <div className="flex items-center justify-between gap-3">
+      <div><h3 className="apple-panel-title text-sm font-semibold">{taskName}</h3><p className="apple-panel-subtitle mt-1 text-xs">Current implementation and investigation work</p></div>
+      <span className="apple-count">{tasks.length}</span>
+    </div>
+    {tasks.length ? <ul className="mt-4 space-y-3">
+      {tasks.map((task) => {
+        const closed = isClosedTask(task)
+        const latestComment = latestTaskComment(task)
+        return <li key={task.sys_id || task.number} className="rounded-lg border border-slate-700 bg-slate-900/60 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div><p className="font-mono text-xs text-cyan-300">{task.number}</p><p className="mt-1 text-sm font-medium text-slate-200">{task.short_description || task.title}</p></div>
+            <span className={`rounded-full px-2 py-1 text-xs font-semibold ${stateStyles[task.state] || stateStyles.Pending}`}>{task.state}</span>
+          </div>
+          {closed ? <div className="mt-3 border-t border-slate-800 pt-3"><p className="text-xs font-semibold uppercase tracking-wider text-emerald-300">Closure note</p><p className="mt-1 text-sm leading-6 text-slate-300">{task.close_notes || 'Task closure is recorded; no closure narrative is available.'}</p></div> : <div className="mt-3 border-t border-slate-800 pt-3"><p className="text-xs font-semibold uppercase tracking-wider text-slate-400">Latest task update</p>{latestComment ? <><p className="mt-1 text-xs text-slate-500">{journalTime(latestComment)}</p><p className="mt-1 text-sm leading-6 text-slate-300">{journalValue(latestComment)}</p></> : <p className="mt-1 text-sm text-slate-500">No task comment has been recorded yet.</p>}</div>}
+        </li>
+      })}
+    </ul> : <p className="mt-4 text-sm text-slate-500">No {taskName.toLowerCase()} are attached to this record.</p>}
+  </section>
+}
+
 export default function WorkItemActivities({ ticket }) {
+  // Problem and change records use internal tasks as their working surface.
+  // Customer journals and incident-child views are intentionally reserved for
+  // incidents and service requests.
+  if (ticket.type === 'CHG' || ticket.type === 'PRB') return <TaskActivities ticket={ticket} />
+
   // child_tickets is the hydrated canonical relationship field. Retain the
   // former child_incidents field only as a compatibility fallback.
   const childTickets = ticket.child_tickets?.length ? ticket.child_tickets : (ticket.child_incidents || [])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -81,9 +82,13 @@ class Ticket(BaseModel):
     caller_id: str = ""
     requested_for: str = ""
     assignment_group: str
+    opened_on: str = ""
+    sap_modules: list[str] = Field(default_factory=list)
     is_breached: bool = False
     on_hold_reason: str | None = None
     sla_status: SlaStatus | None = None
+    sla_health: HealthColor | None = None
+    sla_time_remaining: int | None = None
     sla_remaining_minutes: int | None = None
     sla_remaining_mins: int | None = None
     sla_remaining_percent: int | None = None
@@ -142,6 +147,13 @@ class Ticket(BaseModel):
         self.title = self.short_description
         self.assigned_to = self.assigned_to or self.assignee
         self.assignee = self.assigned_to
+        # The canonical mock database carries a stable opened date for
+        # reporting. Existing records are deterministically backfilled across
+        # the previous four months so dashboard analytics behave like a real
+        # ServiceNow reporting table rather than frontend fixture data.
+        if not self.opened_on:
+            offset = int(hashlib.sha256(self.number.encode()).hexdigest()[:8], 16) % 120
+            self.opened_on = (date(2026, 10, 6) - timedelta(days=offset)).isoformat()
         self.caller_id = self.caller_id or f"{self.assignment_group} Requester"
         self.requested_for = self.requested_for or self.caller_id
         priority_map = {"P1": "1 - Critical", "P2": "2 - High", "P3": "3 - Moderate", "P4": "4 - Low"}
@@ -151,6 +163,9 @@ class Ticket(BaseModel):
         self.sla_remaining_minutes = self.sla_remaining_minutes if self.sla_remaining_minutes is not None else self.sla_remaining_mins
         # Retain the original field while API consumers migrate to the canonical name.
         self.sla_remaining_mins = self.sla_remaining_minutes
+        self.sla_time_remaining = self.sla_remaining_minutes
+        if self.sla_time_remaining is not None:
+            self.sla_health = "RED" if self.sla_time_remaining <= 0 else "YELLOW" if self.sla_time_remaining <= 90 else "GREEN"
         self.parent_incident_id = self.parent_id or self.parent_incident_id
         self.parent_id = self.parent_incident_id
         self.child_incident_ids = self.child_ids or self.child_incident_ids
@@ -165,9 +180,9 @@ class Ticket(BaseModel):
             element="work_notes",
             ticket=self,
         )
+        source_comments = self.comments or self.additional_comments or [self.latest_work_notes]
+        self.comments = _normalise_journal_entries(source_comments, element="comments", ticket=self)
         if self.type in {"INC", "RITM"}:
-            source_comments = self.comments or self.additional_comments or [self.latest_work_notes]
-            self.comments = _normalise_journal_entries(source_comments, element="comments", ticket=self)
             self.additional_comments = [entry.value for entry in self.comments]
         self.ctasks = [_normalise_task(task, "ctask", self) for task in self.ctasks]
         self.ptasks = [_normalise_task(task, "ptask", self) for task in self.ptasks]
@@ -187,6 +202,7 @@ class Ticket(BaseModel):
             f"Confirm the reported impact, execute the approved remediation for {self.title}, "
             "validate service recovery with the requester, and document the evidence in work notes."
         )
+        self.sap_modules = self.sap_modules or _infer_sap_modules(self)
         return self
 
 
@@ -222,6 +238,24 @@ def _normalise_journal_entries(
             is_customer=False,
         ))
     return normalized
+
+
+def _infer_sap_modules(ticket: Ticket) -> list[str]:
+    """Derive stable module tags from the canonical ticket content."""
+
+    text = f"{ticket.short_description} {ticket.description} {ticket.assignment_group}".casefold()
+    module_keywords = (
+        ("SAP EWM", ("ewm", "warehouse", "qrf", "rf handheld")),
+        ("SAP BASIS", ("basis", "netweaver", "sm37", "hana", "transport", "spool")),
+        ("SAP MM", ("sap mm", "purchase order", "supplier master", "material master")),
+        ("SAP SD", ("sap sd", "billing", "tax code", "sales")),
+        ("SAP FICO", ("fico", "finance", "posting")),
+        ("SAP PLM", ("plm", "ehs", "recipe")),
+        ("SAP Security", ("authorization", "grc", "token", "su53")),
+        ("SAP Middleware", ("middleware", "integration", "pi/po", "gateway")),
+    )
+    modules = [module for module, keywords in module_keywords if any(keyword in text for keyword in keywords)]
+    return modules or ["Enterprise ITSM"]
 
 
 def _normalise_task(task: dict[str, str], task_kind: str, ticket: Ticket) -> dict[str, str | list[str] | None]:
@@ -333,7 +367,7 @@ def _journal_thread(
     ]
 
 
-LEGACY_MOCK_DB: dict[str, Ticket] = {
+MOCK_DB: dict[str, Ticket] = {
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock",
         description="A locked SAP EWM qRFC queue is blocking warehouse replication and delaying outbound processing.", state="In Progress",
@@ -561,7 +595,7 @@ LEGACY_MOCK_DB: dict[str, Ticket] = {
 # The active demo catalog is deliberately small but fully relational.  Keep
 # relationship identifiers here (rather than duplicate child snapshots) and
 # resolve snapshots at API time to guarantee journal/status synchronisation.
-MOCK_DB: dict[str, Ticket] = {
+MOCK_DB.update({
     "INC0048102": Ticket(
         id="INC0048102", type="INC", record_type="INC", title="SAP EWM qRFC Queue Lock & Batch Auth Failure",
         description="SAP EWM qRFC queue locking and batch authorization failures are blocking goods issue processing across the warehouse estate.",
@@ -646,7 +680,11 @@ MOCK_DB: dict[str, Ticket] = {
         description="Problem investigation into the coupled SAP EWM qRFC lock, Basis queue ownership, and batch authorization failure.",
         state="Root Cause Analysis", priority="P1", assignee="Omar Rahman", assignment_group="Integration Middleware", rca_phase="RCA In Progress", risk_level="High Impact",
         originating_ticket_ids=["INC0048102"], linked_change="CHG0092100", latest_work_notes="RCA identified a qRFC ownership lock compounded by a missing controlled batch authorization role.",
-        ptasks=[{"id": "PTASK001", "title": "Collect qRFC and SM12 lock traces", "state": "Closed", "close_notes": "Trace collection confirmed the blocked queue owner and authorization failure sequence."}, {"id": "PTASK002", "title": "Validate batch authorization role correction", "state": "Work in Progress"}, {"id": "PTASK003", "title": "Define preventive queue monitoring", "state": "New"}],
+        ptasks=[
+            {"id": "PTASK001", "title": "Collect qRFC and SM12 lock traces", "state": "Closed", "close_notes": "Trace collection confirmed the blocked queue owner and authorization failure sequence."},
+            {"id": "PTASK002", "title": "Validate batch authorization role correction", "state": "Work in Progress", "comments": [{"sys_created_on": "2026-09-23 11:38:00", "value": "Basis validation confirms the corrected role is available in the controlled production client; business retest is pending."}]},
+            {"id": "PTASK003", "title": "Define preventive queue monitoring", "state": "New", "comments": [{"sys_created_on": "2026-09-23 11:42:00", "value": "Monitoring threshold review is queued after the qRFC recovery controls are validated."}]},
+        ],
         resources={"KBA": "KBA003192 — qRFC queue recovery", "Veeva": "Veeva Vault / RCA / EWM batch authorization", "GDrive": "ATLAS / EWM / RCA KT"},
     ),
     "CHG0092100": Ticket(
@@ -654,10 +692,97 @@ MOCK_DB: dict[str, Ticket] = {
         description="Emergency change to unlock the SAP EWM qRFC queue and deploy the approved batch authorization correction.",
         state="Implement", priority="P1", assignee="Elena Rossi", assignment_group="Integration Middleware", cab_status="CAB Approved", risk_level="Emergency Change",
         originating_ticket_ids=["PRB0031022"], latest_work_notes="Emergency CAB approval is recorded; implementation is proceeding through the controlled recovery runbook.",
-        ctasks=[{"id": "CTASK001", "title": "Pre-patch backup and recovery point", "state": "Closed Complete", "close_notes": "Backup checksum and recovery point validated."}, {"id": "CTASK002", "title": "Deploy qRFC and authorization correction", "state": "Open"}],
+        ctasks=[
+            {"id": "CTASK001", "title": "Pre-patch backup and recovery point", "state": "Closed Complete", "close_notes": "Backup checksum and recovery point validated."},
+            {"id": "CTASK002", "title": "Deploy qRFC and authorization correction", "state": "Open", "comments": [{"sys_created_on": "2026-09-23 11:45:00", "value": "Implementation window is active. The team is applying the approved qRFC recovery and authorization correction under CAB control."}]},
+        ],
         resources={"KBA": "KBA003192 — qRFC emergency recovery", "Veeva": "Veeva Vault / Change Control / CHG0092100", "GDrive": "ATLAS / EWM / emergency change KT"},
     ),
-}
+    "INC0048131": Ticket(
+        id="INC0048131", type="INC", record_type="INC", title="SAP MM Supplier Master Validation Exception",
+        description="Supplier master validation is failing for a controlled purchasing-data update and requires requester confirmation of the source values.",
+        state="On Hold", priority="P2", assignee="Nina Keller", caller_id="Procurement Operations", assignment_group="SAP MM Support",
+        on_hold_reason="Awaiting Caller", sla_status="AT_RISK", sla_remaining_minutes=110, sentiment="Impatient",
+        latest_work_notes="SAP MM L2 validated the interface payload and is awaiting the requester’s confirmation of the controlled supplier attributes.",
+        comments=_journal_thread("INC0048131", requester="Procurement Operations", l1_support="Procurement Service Desk", l2_support="Nina Keller", initial_report="Supplier master changes are failing validation before the purchasing update can be released.", monitoring_check="L1 confirmed the error occurs only for the controlled supplier record and attached the validation result.", business_impact="Procurement cannot release the supplier amendment before the next purchasing cycle.", diagnostic_update="SAP MM L2 isolated the mandatory source attribute mismatch and requested confirmation from the business owner."),
+        resources={"KBA": "KBA-MM-388 — Supplier master validation recovery", "Veeva": "Veeva Vault / Procurement / supplier-master-control", "GDrive": "ATLAS / SAP MM / supplier master KT"},
+    ),
+    "INC0048132": Ticket(
+        id="INC0048132", type="INC", record_type="INC", title="SAP EWM Outbound Wave Confirmation Dependency",
+        description="Outbound wave confirmation is paused until the linked warehouse device recovery activity completes its validation.",
+        state="On Hold", priority="P3", assignee="Maya Chen", caller_id="Warehouse Operations", assignment_group="SAP EWM Support",
+        on_hold_reason="Awaiting Child", sla_status="AT_RISK", sla_remaining_minutes=145, sentiment="Calm",
+        latest_work_notes="EWM L2 is awaiting validation from the dependent warehouse recovery work before releasing outbound wave confirmation.",
+        comments=_journal_thread("INC0048132", requester="Warehouse Operations", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Outbound wave confirmation is paused after the device-recovery validation dependency was raised.", monitoring_check="L1 confirmed the queue is stable and documented the downstream validation dependency.", business_impact="The next outbound wave cannot be released until warehouse device validation completes.", diagnostic_update="SAP EWM L2 confirmed no additional queue remediation is required and is waiting for the dependent recovery evidence."),
+        resources={"KBA": "KBA-EWM-274 — Outbound wave dependency handling", "Veeva": "Veeva Vault / Warehouse / outbound-wave-control", "GDrive": "ATLAS / SAP EWM / outbound wave KT"},
+    ),
+    "INC0048133": Ticket(
+        id="INC0048133", type="INC", record_type="INC", title="SAP EWM Wave Release Queue Throughput Degradation",
+        description="Outbound wave releases are delayed as EWM queue throughput drops during the warehouse peak window.", state="In Progress",
+        priority="P2", assignee="Maya Chen", caller_id="Warehouse Operations", assignment_group="SAP EWM Support", opened_on="2026-07-09",
+        sla_status="AT_RISK", sla_remaining_minutes=88, sentiment="Impatient", latest_work_notes="EWM L2 is balancing queue workers and validating throughput against the planned wave-release volume.",
+        comments=_journal_thread("INC0048133", requester="Warehouse Operations", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Outbound wave releases are taking longer than the warehouse operating threshold.", monitoring_check="L1 confirmed worker saturation during the peak wave-release window.", business_impact="Picking teams are waiting for wave assignments before the afternoon carrier cut-off.", diagnostic_update="EWM L2 is validating queue-worker capacity and the release scheduler profile."),
+        resources={"KBA": "KBA-EWM-311 — Wave release throughput recovery", "Veeva": "Veeva Vault / Warehouse / wave-release-control", "GDrive": "ATLAS / SAP EWM / wave release KT"},
+    ),
+    "INC0048134": Ticket(
+        id="INC0048134", type="INC", record_type="INC", title="SAP EWM RF Device Session Re-authentication Failure",
+        description="Warehouse RF devices intermittently fail session re-authentication after a controlled EWM mobility policy refresh.", state="In Progress",
+        priority="P2", assignee="Maya Chen", caller_id="Warehouse Mobility Team", assignment_group="SAP EWM Support", opened_on="2026-08-11",
+        sla_status="AT_RISK", sla_remaining_minutes=76, sentiment="Impatient", latest_work_notes="EWM L2 is comparing RF session policy claims with the approved mobility role baseline.",
+        comments=_journal_thread("INC0048134", requester="Warehouse Mobility Team", l1_support="Mobility Service Desk", l2_support="Maya Chen", initial_report="Several RF devices require repeated sign-in after the mobility policy refresh.", monitoring_check="L1 correlated the failed sessions with the policy deployment timestamp.", business_impact="Warehouse users lose scanning time while device sessions are re-established.", diagnostic_update="EWM L2 is comparing the token claims and approved RF mobility role baseline."),
+        resources={"KBA": "KBA-EWM-326 — RF session authentication recovery", "Veeva": "Veeva Vault / Warehouse / RF-access-control", "GDrive": "ATLAS / SAP EWM / RF mobility KT"},
+    ),
+    "INC0048135": Ticket(
+        id="INC0048135", type="INC", record_type="INC", title="SAP EWM Inbound Delivery Replication Delay",
+        description="Inbound delivery replication from ERP to EWM was delayed after a transient queue communication interruption.", state="Resolved",
+        priority="P3", assignee="Maya Chen", caller_id="Inbound Logistics", assignment_group="SAP EWM Support", opened_on="2026-09-08",
+        sla_status="ON_TRACK", sla_remaining_minutes=310, sentiment="Calm", latest_work_notes="EWM L2 replayed the validated queue entries and confirmed inbound delivery consistency.",
+        close_code="Solved (Permanently)", closure_notes="Replayed the validated delivery queue entries and confirmed that inbound replication remained stable through the next receiving cycle.",
+        comments=_journal_thread("INC0048135", requester="Inbound Logistics", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Inbound deliveries are not appearing in EWM after ERP confirmation.", monitoring_check="L1 identified a short communication interruption and preserved the queue IDs.", business_impact="Receiving teams cannot complete inbound putaway for the affected deliveries.", diagnostic_update="EWM L2 replayed the validated entries and requested a receiving-cycle confirmation."),
+        resources={"KBA": "KBA-EWM-335 — Inbound replication recovery", "Veeva": "Veeva Vault / Warehouse / inbound-delivery-control", "GDrive": "ATLAS / SAP EWM / inbound replication KT"},
+    ),
+    "INC0048136": Ticket(
+        id="INC0048136", type="INC", record_type="INC", title="SAP EWM Stock Type Synchronization Mismatch",
+        description="A stock-type synchronization mismatch is preventing selected warehouse bins from receiving the approved status update.", state="In Progress",
+        priority="P2", assignee="Maya Chen", caller_id="Inventory Control", assignment_group="SAP EWM Support", opened_on="2026-10-02",
+        sla_status="AT_RISK", sla_remaining_minutes=104, sentiment="Calm", latest_work_notes="EWM L2 is validating stock-type mapping and the outbound replication acknowledgement.",
+        comments=_journal_thread("INC0048136", requester="Inventory Control", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Warehouse bins retain the prior stock type after the approved inventory adjustment.", monitoring_check="L1 confirmed the mismatch is limited to the affected synchronization queue.", business_impact="Inventory control cannot release the affected bins for the next allocation run.", diagnostic_update="EWM L2 is checking the stock-type mapping and replication acknowledgement."),
+        resources={"KBA": "KBA-EWM-342 — Stock type synchronization validation", "Veeva": "Veeva Vault / Warehouse / inventory-control", "GDrive": "ATLAS / SAP EWM / stock type KT"},
+    ),
+    "INC0048137": Ticket(
+        id="INC0048137", type="INC", record_type="INC", title="SAP BASIS Spool Work Process Saturation",
+        description="Spool work processes are approaching saturation during scheduled warehouse-label generation.", state="In Progress",
+        priority="P2", assignee="Jonas Weber", caller_id="Warehouse Print Services", assignment_group="SAP Basis Ops", opened_on="2026-07-16",
+        sla_status="AT_RISK", sla_remaining_minutes=92, sentiment="Impatient", latest_work_notes="Basis L2 is reviewing spool-server queue depth and work-process allocation before the next print cycle.",
+        comments=_journal_thread("INC0048137", requester="Warehouse Print Services", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="Warehouse label jobs are delayed because spool processing is reaching capacity.", monitoring_check="L1 captured spool queue depth and work-process saturation evidence.", business_impact="Outbound labels may not be ready for the next dispatch wave.", diagnostic_update="Basis L2 is reviewing work-process allocation and spool-server queue controls."),
+        resources={"KBA": "KBA-BASIS-451 — Spool saturation response", "Veeva": "Veeva Vault / Infrastructure / print-control", "GDrive": "ATLAS / SAP Basis / spool operations KT"},
+    ),
+    "INC0048138": Ticket(
+        id="INC0048138", type="INC", record_type="INC", title="SAP BASIS HANA Backup Chain Alert",
+        description="The HANA backup monitoring chain reported a delayed log-backup handoff requiring Basis validation.", state="Resolved",
+        priority="P3", assignee="Jonas Weber", caller_id="Database Operations", assignment_group="SAP Basis Ops", opened_on="2026-08-19",
+        sla_status="ON_TRACK", sla_remaining_minutes=420, sentiment="Calm", latest_work_notes="Basis L2 confirmed the backup chain resumed and the retention checkpoint was validated.",
+        close_code="Solved (Permanently)", closure_notes="Validated the log-backup handoff, confirmed the next full backup checkpoint, and recorded the successful retention verification.",
+        comments=_journal_thread("INC0048138", requester="Database Operations", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="HANA monitoring reports a delayed log-backup handoff for the production system.", monitoring_check="L1 confirmed no data loss indicators and attached the backup-monitoring timeline.", business_impact="Operations needs confirmation that the protected backup chain remains compliant.", diagnostic_update="Basis L2 validated the handoff and monitored the subsequent checkpoint."),
+        resources={"KBA": "KBA-BASIS-463 — HANA backup chain validation", "Veeva": "Veeva Vault / Infrastructure / backup-control", "GDrive": "ATLAS / SAP Basis / HANA backup KT"},
+    ),
+    "INC0048139": Ticket(
+        id="INC0048139", type="INC", record_type="INC", title="SAP BASIS RFC Destination TLS Certificate Warning",
+        description="A production RFC destination is approaching its TLS certificate renewal threshold and needs controlled validation.", state="In Progress",
+        priority="P3", assignee="Jonas Weber", caller_id="Integration Operations", assignment_group="SAP Basis Ops", opened_on="2026-09-14",
+        sla_status="ON_TRACK", sla_remaining_minutes=360, sentiment="Calm", latest_work_notes="Basis L2 is validating the replacement certificate chain in the controlled connectivity path.",
+        comments=_journal_thread("INC0048139", requester="Integration Operations", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="An RFC destination certificate warning was raised ahead of the production renewal window.", monitoring_check="L1 verified the expiry threshold and captured the active certificate chain.", business_impact="Integration teams need assurance that the renewal will not interrupt scheduled interfaces.", diagnostic_update="Basis L2 is validating the replacement certificate chain and controlled cutover plan."),
+        resources={"KBA": "KBA-BASIS-474 — RFC TLS renewal validation", "Veeva": "Veeva Vault / Infrastructure / certificate-control", "GDrive": "ATLAS / SAP Basis / RFC TLS KT"},
+    ),
+    "INC0048140": Ticket(
+        id="INC0048140", type="INC", record_type="INC", title="SAP BASIS Transport Import Lock in QA",
+        description="A QA transport import remains locked after a controlled deployment and requires Basis recovery validation.", state="In Progress",
+        priority="P2", assignee="Jonas Weber", caller_id="Release Management", assignment_group="SAP Basis Ops", opened_on="2026-10-04",
+        sla_status="AT_RISK", sla_remaining_minutes=72, sentiment="Impatient", latest_work_notes="Basis L2 is validating the import queue lock owner and the approved rollback point before releasing the transport.",
+        comments=_journal_thread("INC0048140", requester="Release Management", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="The QA transport import did not complete and the import queue remains locked.", monitoring_check="L1 preserved the transport log and confirmed the lock is isolated to the current QA queue.", business_impact="Release validation cannot proceed until the controlled import is available in QA.", diagnostic_update="Basis L2 is checking the lock owner and approved rollback point before recovery."),
+        resources={"KBA": "KBA-BASIS-486 — Transport lock recovery", "Veeva": "Veeva Vault / Release / transport-control", "GDrive": "ATLAS / SAP Basis / transport KT"},
+    ),
+})
 
 
 def _relationship_snapshot(

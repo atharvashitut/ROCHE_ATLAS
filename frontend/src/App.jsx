@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react'
 import Chat from './components/Chat'
 import Dashboard from './components/Dashboard'
+import Stats from './components/Stats'
 
-const tabs = [{ id: 'dashboard', label: 'Dashboard' }, { id: 'chat', label: 'Chat' }]
+const tabs = [{ id: 'stats', label: 'Stats' }, { id: 'dashboard', label: 'Dashboard' }, { id: 'chat', label: 'Chat' }]
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard')
@@ -20,6 +21,6 @@ export default function App() {
         <div className="flex items-center gap-3"><div className="appearance-switch" role="group" aria-label="Appearance"><button type="button" onClick={() => setTheme('light')} aria-pressed={lightTheme} className={lightTheme ? 'is-active' : ''}>Light</button><button type="button" onClick={() => setTheme('dark')} aria-pressed={!lightTheme} className={!lightTheme ? 'is-active' : ''}>Dark</button></div><nav aria-label="Primary"><div className={`${lightTheme ? 'apple-nav-tabs rounded-xl border-[#d6d9e0] bg-[#eff0f2]' : 'rounded-lg border-slate-700'} flex border p-1`}>{tabs.map((tab) => <button key={tab.id} type="button" onClick={() => setActiveTab(tab.id)} aria-current={activeTab === tab.id ? 'page' : undefined} className={`rounded-md px-4 py-2 text-sm font-semibold transition ${activeTab === tab.id ? (lightTheme ? 'monday-primary' : 'bg-blue-600 text-white') : (lightTheme ? 'text-[#6b6f7a] hover:bg-[#faf9f6] hover:text-[#30323a]' : 'text-slate-300 hover:text-white')}`}>{tab.label}</button>)}</div></nav></div>
       </div>
     </header>
-    <main><div className={activeTab === 'dashboard' ? 'block' : 'hidden'}><Dashboard /></div><div className={activeTab === 'chat' ? 'block' : 'hidden'}><Chat /></div></main>
+    <main><div className={activeTab === 'stats' ? 'block' : 'hidden'}><Stats /></div><div className={activeTab === 'dashboard' ? 'block' : 'hidden'}><Dashboard /></div><div className={activeTab === 'chat' ? 'block' : 'hidden'}><Chat /></div></main>
   </div>
 }

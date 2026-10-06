@@ -1,4 +1,9 @@
-"""Hybrid multi-connector retrieval with Gemini grounding and ITIL fallback reasoning."""
+"""Hybrid Gemini RAG over the canonical ATLAS enterprise corpus.
+
+Retrieval uses a persistent local Chroma collection and Gemini embeddings when
+credentials are configured. Ticket state, journal streams, work notes, task
+evidence, and four connector sources are indexed as independent chunks.
+"""
 
 from __future__ import annotations
 
@@ -6,179 +11,245 @@ import os
 import re
 from typing import Any
 
-try:  # The API remains available in local development without the optional SDK.
+try:
     from google import genai
-except ImportError:  # pragma: no cover - depends on installed optional dependencies
+except ImportError:  # pragma: no cover - optional until requirements are installed
     genai = None
 
-from .central_db import central_knowledge_documents, central_ticket_records
-from .models import Ticket
+from .central_db import central_ticket_records
+from .connectors import connector_documents, connector_statuses
+from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, serialize_retrieved
 
-
-# A compatibility name for existing callers; its values are supplied solely by
-# the central registry rather than a second hard-coded RAG corpus.
-KNOWLEDGE_CORPUS: list[dict[str, str]] = central_knowledge_documents()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GENERATION_MODEL = os.getenv("ATLAS_GEMINI_GENERATION_MODEL", "gemini-1.5-flash")
 try:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY and genai else None
-except Exception:  # pragma: no cover - protects app startup from malformed local credentials
+except Exception:  # pragma: no cover - preserve local availability on malformed credentials
     gemini_client = None
 
 
-def _tokens(text: str) -> set[str]:
-    """Return meaningful terms with ITSM/SAP synonym expansion for broad matching."""
-
-    stop_words = {"a", "an", "and", "are", "can", "do", "for", "how", "i", "in", "is", "it", "me", "of", "on", "please", "show", "tell", "the", "this", "to", "what", "with", "you"}
-    tokens = {term for term in re.findall(r"[a-z0-9]+", text.lower()) if term not in stop_words}
-    synonyms = {
-        "po": {"purchase", "order", "workflow"},
-        "qrfc": {"queue", "replication", "sm12"},
-        "authorization": {"access", "role", "su53"},
-        "solman": {"monitoring", "alert"},
-        "batch": {"job", "sm37"},
-    }
-    for term, related in synonyms.items():
-        if term in tokens:
-            tokens.update(related)
-    return tokens
+def _journal_text(entries: list[Any]) -> str:
+    return " ".join(entry.value if hasattr(entry, "value") else str(entry.get("value", entry)) for entry in entries)
 
 
-def _ticket_chunk(ticket: Ticket) -> dict[str, str]:
-    comments = " ".join(entry.value for entry in ticket.comments)
-    work_notes = " ".join(entry.value for entry in ticket.work_notes)
-    references = " ".join(" ".join(reference.values()) for reference in ticket.knowledge_refs)
-    resources = " ".join(ticket.resources.values())
+def _task_text(tasks: list[dict[str, object]]) -> str:
+    return " ".join(" ".join(str(task.get(field, "")) for field in ("number", "short_description", "title", "state", "close_notes")) for task in tasks)
+
+
+def build_retrieval_documents() -> list[RetrievalDocument]:
+    """Create stable, source-specific chunks from the canonical data stores."""
+
+    documents: list[RetrievalDocument] = []
+    for source in connector_documents():
+        documents.append(RetrievalDocument(
+            id=f"source:{source['id']}", title=source["title"],
+            content=f"{source['summary']}\n{source['content']}\nTags: {' '.join(source['tags'])}",
+            source_type=source["source_type"], system=source["system"], connector=source["connector"],
+            url=source["url"], record_type="knowledge", ticket_number=",".join(source["ticket_numbers"]),
+            ticket_id=",".join(source["ticket_numbers"]), assignment_group="Enterprise Knowledge", module="Enterprise Knowledge", section="knowledge_article",
+        ))
+    for ticket in central_ticket_records().values():
+        number = ticket.number
+        ticket_url = f"/api/tickets/{number}"
+        module = ", ".join(ticket.sap_modules)
+        documents.append(RetrievalDocument(
+            id=f"ticket:{number}:overview", title=f"{number} — {ticket.short_description}",
+            content="\n".join(filter(None, [ticket.short_description, ticket.description, f"State: {ticket.state}. Priority: {ticket.priority}. Assignment group: {ticket.assignment_group}. Assigned to: {ticket.assigned_to}.", ticket.ai_resolution_guide])),
+            source_type="ServiceNow Ticket", system="ServiceNow", connector="ServiceNow", url=ticket_url,
+            record_type=ticket.type, ticket_number=number, ticket_id=ticket.id, assignment_group=ticket.assignment_group, module=module, section="ticket_overview",
+        ))
+        journal = _journal_text(ticket.comments) + " " + _journal_text(ticket.work_notes)
+        if journal.strip():
+            documents.append(RetrievalDocument(
+                id=f"ticket:{number}:journal", title=f"{number} — Journal and engineering notes", content=journal,
+                source_type="ServiceNow Journal", system="ServiceNow", connector="ServiceNow", url=ticket_url,
+                record_type=ticket.type, ticket_number=number, ticket_id=ticket.id, assignment_group=ticket.assignment_group, module=module, section="journal",
+            ))
+        tasks = _task_text(ticket.ctasks) + " " + _task_text(ticket.ptasks) + " " + _task_text(ticket.sctasks)
+        if tasks.strip():
+            documents.append(RetrievalDocument(
+                id=f"ticket:{number}:tasks", title=f"{number} — Linked task evidence", content=tasks,
+                source_type="ServiceNow Task", system="ServiceNow", connector="ServiceNow", url=ticket_url,
+                record_type=ticket.type, ticket_number=number, ticket_id=ticket.id, assignment_group=ticket.assignment_group, module=module, section="tasks",
+            ))
+    return documents
+
+
+def initialize_vector_db() -> None:
+    """Build the vector DB from the live canonical ticket catalog at startup."""
+
+    VECTOR_STORE.sync(build_retrieval_documents())
+
+
+def _query_terms(text: str) -> set[str]:
+    ignored = {"a", "an", "and", "are", "can", "do", "for", "how", "i", "in", "is", "it", "me", "of", "on", "please", "show", "tell", "the", "this", "to", "what", "with", "status", "ticket"}
+    return {term for term in re.findall(r"[a-z0-9_/-]+", text.casefold()) if len(term) > 1 and term not in ignored}
+
+
+def _explicit_ticket_numbers(query_text: str) -> set[str]:
+    """Find direct ServiceNow record references before semantic retrieval."""
+
+    query = query_text.casefold()
     return {
-        "id": ticket.number,
-        "title": ticket.short_description,
-        "system": "ServiceNow Ticket",
-        "connector": "ServiceNow",
-        "url": f"/api/tickets/{ticket.number}",
-        "content": " ".join([ticket.short_description, ticket.description, ticket.ai_resolution_guide, comments, work_notes, references, resources]),
-        "is_known_issue": str(ticket.is_known_issue).lower(),
+        ticket.number
+        for ticket in central_ticket_records().values()
+        if ticket.number.casefold() in query or ticket.id.casefold() in query
     }
 
 
-def _connector_chunks() -> dict[str, list[dict[str, str]]]:
-    """Expose every connector so searches run independently across all four tools."""
-
-    connectors = {name: [] for name in ("ServiceNow", "Veeva Vault", "HP ALM", "Google Drive")}
-    for chunk in KNOWLEDGE_CORPUS:
-        connectors[chunk["connector"]].append(chunk)
-    connectors["ServiceNow"].extend(_ticket_chunk(ticket) for ticket in central_ticket_records().values())
-    return connectors
-
-
-def _score(query_terms: set[str], chunk: dict[str, str]) -> int:
-    title_terms = _tokens(chunk["title"])
-    content_terms = _tokens(chunk["content"])
-    return len(query_terms & content_terms) + (len(query_terms & title_terms) * 2)
-
-
-def _search_connector(query_terms: set[str], chunks: list[dict[str, str]], limit: int = 2) -> list[dict[str, str]]:
-    matches = [(score, index, chunk) for index, chunk in enumerate(chunks) if (score := _score(query_terms, chunk)) > 0]
-    return [chunk for _, _, chunk in sorted(matches, key=lambda match: (match[0], -match[1]), reverse=True)[:limit]]
-
-
-def retrieve_multi_tool_context(query_text: str) -> list[dict[str, str]]:
-    """Search ServiceNow, Veeva, HP ALM, and Google Drive independently and merge matches."""
-
-    query_terms = _tokens(query_text)
-    if not query_terms:
-        return []
-    connector_results = [_search_connector(query_terms, chunks) for chunks in _connector_chunks().values()]
-    return [chunk for result in connector_results for chunk in result][:6]
-
-
-def _sources(chunks: list[dict[str, str]]) -> list[dict[str, str]]:
-    return [{key: chunk[key] for key in ("id", "title", "system", "url")} for chunk in chunks]
-
-
-def _targets_unmapped_issue(query_text: str) -> bool:
-    """Identify explicit zero-day signatures before broad keyword retrieval.
-
-    An unknown error code must not be accidentally grounded on a different
-    record merely because both descriptions include generic words such as
-    "sync" or "failure".
-    """
+def _has_unmapped_signature(query_text: str) -> bool:
+    """Prevent an explicit zero-day signature from receiving unrelated citations."""
 
     signatures = re.findall(r"[a-z]+[_-]\d+[a-z0-9_-]*|\b\d{4,}\b", query_text.casefold())
     for ticket in central_ticket_records().values():
-        if ticket.is_known_issue:
-            continue
-        searchable = f"{ticket.number} {ticket.short_description} {ticket.description}".casefold()
-        if any(signature in searchable for signature in signatures):
-            return True
+        if not ticket.is_known_issue:
+            haystack = f"{ticket.number} {ticket.short_description} {ticket.description}".casefold()
+            if any(signature in haystack for signature in signatures):
+                return True
     return False
 
 
-def _grounded_prompt(query_text: str, chunks: list[dict[str, str]]) -> str:
-    snippets = "\n\n".join(f"[{chunk['id']}] {chunk['title']} ({chunk['system']})\n{chunk['content']}\nLink: {chunk['url']}" for chunk in chunks)
+def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, object]]:
+    """Execute hybrid semantic + lexical relevance filtering over vector results."""
+
+    if not query_text.strip() or _has_unmapped_signature(query_text):
+        return []
+    documents = build_retrieval_documents()
+    VECTOR_STORE.sync(documents)
+    terms = _query_terms(query_text)
+    explicit_tickets = _explicit_ticket_numbers(query_text)
+    selected: list[dict[str, object]] = []
+    selected_ids: set[str] = set()
+    # A direct ServiceNow number is an authoritative context selection. Add
+    # its overview/journal/task chunks before approximate vector results.
+    for document in documents:
+        if document.ticket_number in explicit_tickets:
+            payload = serialize_retrieved(RetrievedDocument(document, 1.0))
+            payload["lexical_hits"] = 1
+            selected.append(payload)
+            selected_ids.add(document.id)
+    for result in VECTOR_STORE.query(query_text, limit=limit):
+        document = result.document
+        if document.id in selected_ids:
+            continue
+        searchable = f"{document.title} {document.content}".casefold()
+        lexical_hits = sum(term in searchable for term in terms)
+        semantic_enough = result.score >= 0.62 and VECTOR_STORE.embedder.mode == "gemini"
+        if lexical_hits or semantic_enough:
+            payload = serialize_retrieved(result)
+            payload["lexical_hits"] = lexical_hits
+            selected.append(payload)
+    return selected[:6]
+
+
+def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
+    """Hydrate retrieved ticket IDs from MOCK_DB immediately before generation."""
+
+    ticket_ids = {
+        str(chunk.get("ticket_id") or chunk.get("ticket_number") or "").upper()
+        for chunk in chunks
+    }
+    live_records = [central_ticket_records().get(ticket_id) for ticket_id in ticket_ids]
+    snapshots = []
+    for ticket in live_records:
+        if ticket is None:
+            continue
+        latest_comment = ticket.comments[-1].value if ticket.comments else "No journal comment recorded"
+        snapshots.append(
+            f"{ticket.number}: state={ticket.state}; assignment_group={ticket.assignment_group}; "
+            f"assignee={ticket.assigned_to}; sla={ticket.sla_health}; time_remaining={ticket.sla_time_remaining}; "
+            f"modules={', '.join(ticket.sap_modules)}; latest_journal={latest_comment}"
+        )
+    return "\n".join(snapshots)
+
+
+def _grounded_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
+    excerpts = "\n\n".join(f"[{chunk['id']}] {chunk['title']} ({chunk['system']})\n{str(chunk['content'])[:1800]}\nCitation: {chunk['url']}" for chunk in chunks)
+    live_context = _live_ticket_context(chunks)
     return (
-        "You are the Roche ATLAS ITIL Co-Pilot. Use only the internal snippets below. "
-        "Provide a full, step-by-step resolution with an assessment, safe validation steps, "
-        "and connected-source citations using the supplied URLs. Do not invent source details.\n\n"
-        f"Question: {query_text}\n\nInternal snippets:\n{snippets}"
+        "You are the Roche ATLAS ITIL Co-Pilot. Answer only from the internal evidence below. "
+        "Provide an assessment, safe next actions, validation/closure evidence, and source citations using [id]. "
+        "Do not invent source details.\n\n"
+        f"Question: {query_text}\n\nLive ServiceNow ticket state from MOCK_DB:\n{live_context}\n\nEnterprise evidence:\n{excerpts}"
     )
 
 
-def _reasoning_prompt(query_text: str) -> str:
+def _fallback_prompt(query_text: str) -> str:
     return (
-        "No specific internal enterprise documents were found across connected tools for this query. "
-        "Act as an expert ITIL L2/L3 Enterprise Support Co-Pilot and provide a diagnostic hypothesis, "
-        "troubleshooting steps, and recommended investigation commands based on general ITIL best practices.\n\n"
+        "No relevant internal enterprise evidence was retrieved. You are the Roche ATLAS ITIL L2/L3 Co-Pilot. "
+        "Provide a labelled diagnostic hypothesis, safe evidence collection steps, a rollback-aware investigation plan, and escalation criteria. "
+        "Do not claim internal documents support the answer.\n\n"
         f"Question: {query_text}"
     )
 
 
-def _local_grounded_answer(query_text: str, chunks: list[dict[str, str]]) -> str:
-    sources = "; ".join(f"[{chunk['id']}] {chunk['title']}" for chunk in chunks)
+def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
+    if not chunks:
+        return (
+            f"Diagnostic hypothesis: {query_text} requires evidence-led investigation before a remediation decision.\n\n"
+            "1. Confirm impact, scope, timestamps, recent changes, and a known-good comparison path.\n"
+            "2. Preserve logs, monitoring signals, and correlation IDs before any retry or restart.\n"
+            "3. Validate the owning service, dependencies, rollback route, and change-control requirements.\n"
+            "4. Escalate with the collected evidence and record requester-facing updates in the ServiceNow journal."
+        )
+    citations = ", ".join(f"[{chunk['id']}]" for chunk in chunks[:4])
     return (
-        f"Assessment: ATLAS found internal evidence relevant to “{query_text}”.\n\n"
-        f"1. Review the active record and its latest journal/work-note evidence.\n"
-        f"2. Follow the approved recovery or validation procedure in: {sources}.\n"
-        "3. Validate service restoration with the requester and capture evidence before closure."
+        f"Assessment: ATLAS retrieved relevant enterprise evidence for “{query_text}” {citations}.\n\n"
+        "1. Validate the current ticket state, business impact, and latest human journal update.\n"
+        "2. Follow the source-specific controlled recovery or diagnostic procedure before changing production state.\n"
+        "3. Capture validation evidence, confirm recovery with the requester, and link the resulting work note to the cited record."
     )
 
 
-def _local_reasoning_answer(query_text: str) -> str:
-    return (
-        f"Diagnostic hypothesis: “{query_text}” may involve an application, integration, or access-control failure.\n\n"
-        "1. Confirm business impact, affected users, timestamps, and recent changes.\n"
-        "2. Review monitoring, application logs, job history, and authentication or integration error codes.\n"
-        "3. Compare the failing path with a known-good transaction and escalate to the owning L2/L3 team with evidence.\n"
-        "4. Record a workaround, validation result, and requester confirmation in the ServiceNow journal."
-    )
+def _sources(chunks: list[dict[str, object]]) -> list[dict[str, object]]:
+    seen: set[str] = set()
+    sources: list[dict[str, object]] = []
+    for chunk in chunks:
+        source_id = str(chunk["id"])
+        if source_id not in seen:
+            seen.add(source_id)
+            sources.append({key: chunk[key] for key in ("id", "title", "system", "source_type", "url", "score")})
+    return sources
 
 
 def query_hybrid_rag(query_text: str) -> dict[str, Any]:
-    """Use internal multi-tool RAG when matched; otherwise invoke Gemini ITIL reasoning."""
+    """Retrieve vector evidence, then synthesize a Gemini-grounded response."""
 
-    chunks = [] if _targets_unmapped_issue(query_text) else retrieve_multi_tool_context(query_text)
-    # A ticket explicitly marked as a zero-day must take the parametric ITIL
-    # reasoning route instead of appearing as a false grounded match.
-    chunks = [chunk for chunk in chunks if chunk.get("is_known_issue", "true") != "false"]
+    chunks = retrieve_vector_context(query_text)
     has_internal_match = bool(chunks)
-    prompt = _grounded_prompt(query_text, chunks) if has_internal_match else _reasoning_prompt(query_text)
-    answer = _local_grounded_answer(query_text, chunks) if has_internal_match else _local_reasoning_answer(query_text)
+    prompt = _grounded_prompt(query_text, chunks) if has_internal_match else _fallback_prompt(query_text)
+    answer = _local_answer(query_text, chunks)
+    model_used = "local-grounded-fallback"
     if gemini_client is not None:
         try:
-            generated = gemini_client.models.generate_content(model="gemini-1.5-flash", contents=prompt)
+            generated = gemini_client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
             if generated.text:
-                answer = generated.text
+                answer, model_used = generated.text, GENERATION_MODEL
         except Exception:
-            # Deterministic local synthesis remains available if the hosted model is unavailable.
             pass
-
+    ticket_ids = []
+    for chunk in chunks:
+        ticket_id = str(chunk.get("ticket_id") or chunk.get("ticket_number") or "").upper()
+        if ticket_id in central_ticket_records() and ticket_id not in ticket_ids:
+            ticket_ids.append(ticket_id)
     return {
-        "answer": answer,
-        "sources": _sources(chunks),
-        "model_used": "gemini-1.5-flash",
+        "answer": answer, "sources": _sources(chunks), "model_used": model_used,
+        "embedding_model": VECTOR_STORE.status()["embedding_model"],
         "fallback_reasoning": not has_internal_match,
-        "retrieval_route": "grounded_rag" if has_internal_match else "gemini_itil_reasoning",
+        "retrieval_route": "vector_grounded_rag" if has_internal_match else "gemini_itil_reasoning",
+        "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
+        "ticket_ids": ticket_ids,
     }
 
 
-# Compatibility alias for older integrations calling the previous RAG function directly.
+def rag_status() -> dict[str, object]:
+    """Operational status for local vector retrieval and connector readiness."""
+
+    initialize_vector_db()
+    return {"vector_store": VECTOR_STORE.status(), "connectors": connector_statuses(), "generation_model": GENERATION_MODEL if gemini_client is not None else "local-grounded-fallback"}
+
+
+# Compatibility aliases for older endpoints and integrations.
 query_chatgpt_rag = query_hybrid_rag
+retrieve_multi_tool_context = retrieve_vector_context
