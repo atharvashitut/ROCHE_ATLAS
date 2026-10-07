@@ -20,6 +20,11 @@ function SlaBadge({ ticket }) {
   return <span className={`rounded-full border px-2 py-1 text-xs font-bold ${styles}`}>⏳ {remaining}m remaining</span>
 }
 
+function HoldReasonBadge({ ticket }) {
+  if (ticket.state !== 'On Hold' || !ticket.hold_reason) return null
+  return <span className="rounded-full border border-amber-500/50 bg-amber-950/60 px-2 py-1 text-xs font-bold text-amber-200">⏸ On Hold · {ticket.hold_reason}</span>
+}
+
 function ExecutiveBriefing({ ticket }) {
   const remaining = ticket.sla_remaining_minutes ?? ticket.sla_remaining_mins
   const sla = ticket.is_breached || (typeof remaining === 'number' && remaining <= 0) ? `${Math.abs(remaining || 0)}m overdue` : typeof remaining === 'number' ? `${remaining}m remaining` : 'SLA not recorded'
@@ -36,5 +41,5 @@ function DuplicateWarning({ ticket }) {
 }
 
 export default function TicketCard({ ticket, onClose, onSelectTicket }) {
-  return <article className="apple-drawer h-full overflow-y-auto bg-slate-900/95 p-6 text-slate-100"><div className="apple-drawer-header mb-7 flex items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><p className="font-mono text-sm text-teal-300">{ticket.number || ticket.id} · {ticket.type}</p>{['INC', 'RITM'].includes(ticket.type) && <SlaBadge ticket={ticket} />}<SentimentBadge ticket={ticket} /></div><h2 className="mt-2 text-2xl font-semibold tracking-tight">{ticket.short_description || ticket.title}</h2><p className="mt-3 max-w-xl text-sm leading-6 text-slate-400">{ticket.description}</p><p className="mt-3 text-xs font-medium text-slate-500">Priority {ticket.priority}</p></div>{onClose && <button type="button" onClick={onClose} aria-label="Close ticket details" className="apple-close rounded-full border border-slate-600 px-3 py-1.5 text-sm hover:border-teal-400/60 hover:bg-slate-800">×</button>}</div><div className="space-y-5"><ExecutiveBriefing ticket={ticket} /><DuplicateWarning ticket={ticket} /><TopologyTree ticket={ticket} onSelectTicket={onSelectTicket} /><WorkItemActivities ticket={ticket} /><KnowledgeReferences references={ticket.knowledge_refs} /></div></article>
+  return <article className="apple-drawer h-full overflow-y-auto bg-slate-900/95 p-6 text-slate-100"><div className="apple-drawer-header mb-7 flex items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><p className="font-mono text-sm text-teal-300">{ticket.number || ticket.id} · {ticket.type}</p><HoldReasonBadge ticket={ticket} />{['INC', 'RITM'].includes(ticket.type) && <SlaBadge ticket={ticket} />}<SentimentBadge ticket={ticket} /></div><h2 className="mt-2 text-2xl font-semibold tracking-tight">{ticket.short_description || ticket.title}</h2><p className="mt-3 max-w-xl text-sm leading-6 text-slate-400">{ticket.description}</p><p className="mt-3 text-xs font-medium text-slate-500">Priority {ticket.priority}</p></div>{onClose && <button type="button" onClick={onClose} aria-label="Close ticket details" className="apple-close rounded-full border border-slate-600 px-3 py-1.5 text-sm hover:border-teal-400/60 hover:bg-slate-800">×</button>}</div><div className="space-y-5"><ExecutiveBriefing ticket={ticket} /><DuplicateWarning ticket={ticket} /><TopologyTree ticket={ticket} onSelectTicket={onSelectTicket} /><WorkItemActivities ticket={ticket} /><KnowledgeReferences references={ticket.knowledge_refs} /></div></article>
 }

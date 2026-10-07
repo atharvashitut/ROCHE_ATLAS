@@ -8,6 +8,7 @@ be introduced without changing retrieval, citation, or chat code.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any, Iterable, Protocol
 
 from .central_db import central_knowledge_records
@@ -30,6 +31,7 @@ class CanonicalMockConnector:
 
     name: str
     system: str
+    required_environment: tuple[str, ...] = ()
 
     def read_documents(self) -> Iterable[dict[str, Any]]:
         return [
@@ -40,21 +42,25 @@ class CanonicalMockConnector:
 
     def status(self) -> dict[str, object]:
         documents = list(self.read_documents())
+        missing_environment = [name for name in self.required_environment if not os.getenv(name)]
         return {
             "connector": self.name,
             "system": self.system,
             "mode": "canonical_mock",
-            "configured": True,
+            "configured": not missing_environment,
+            "integration_ready": not missing_environment,
+            "required_environment": list(self.required_environment),
+            "missing_environment": missing_environment,
             "document_count": len(documents),
             "write_enabled": False,
         }
 
 
 CONNECTORS: tuple[EnterpriseConnector, ...] = (
-    CanonicalMockConnector("ServiceNow", "ServiceNow ITSM"),
-    CanonicalMockConnector("Veeva Vault", "Veeva Vault QMS"),
-    CanonicalMockConnector("HP ALM", "HP ALM Quality Center"),
-    CanonicalMockConnector("Google Drive", "Google Drive KT Hub"),
+    CanonicalMockConnector("ServiceNow", "ServiceNow ITSM", ("SERVICENOW_INSTANCE_URL", "SERVICENOW_CLIENT_ID", "SERVICENOW_CLIENT_SECRET")),
+    CanonicalMockConnector("Veeva Vault", "Veeva Vault QMS", ("VEEVA_VAULT_URL", "VEEVA_CLIENT_ID", "VEEVA_CLIENT_SECRET")),
+    CanonicalMockConnector("HP ALM", "HP ALM Quality Center", ("HP_ALM_BASE_URL", "HP_ALM_CLIENT_ID", "HP_ALM_CLIENT_SECRET")),
+    CanonicalMockConnector("Google Drive", "Google Drive KT Hub", ("GOOGLE_DRIVE_FOLDER_ID", "GOOGLE_APPLICATION_CREDENTIALS")),
 )
 
 

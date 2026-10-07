@@ -30,16 +30,18 @@ function SlaBadge({ ticket }) {
 }
 
 function ContextMetrics({ ticket }) {
-  if (ticket.type === 'INC' || ticket.type === 'RITM') return <div className="space-y-1 text-xs text-slate-300"><p><span className="text-slate-500">Sentiment:</span> {ticket.sentiment}</p></div>
-  if (ticket.type === 'PRB') return <div className="space-y-1 text-xs text-slate-300"><p><span className="text-slate-500">RCA phase:</span> {ticket.rca_phase}</p><p><span className="text-slate-500">Risk:</span> {ticket.risk_level}</p></div>
-  return <div className="space-y-1 text-xs text-slate-300"><p><span className="text-slate-500">CAB status:</span> {ticket.cab_status}</p><p><span className="text-slate-500">Risk:</span> {ticket.risk_level}</p></div>
+  const holdReason = ticket.state === 'On Hold' ? ticket.hold_reason : null
+  const holdReasonLine = holdReason && <p className="font-semibold text-amber-200"><span className="text-slate-500">On Hold ·</span> {holdReason}</p>
+  if (ticket.type === 'INC' || ticket.type === 'RITM') return <div className="space-y-1 text-xs text-slate-300">{holdReasonLine}<p><span className="text-slate-500">Sentiment:</span> {ticket.sentiment}</p></div>
+  if (ticket.type === 'PRB') return <div className="space-y-1 text-xs text-slate-300">{holdReasonLine}<p><span className="text-slate-500">RCA phase:</span> {ticket.rca_phase}</p><p><span className="text-slate-500">Risk:</span> {ticket.risk_level}</p></div>
+  return <div className="space-y-1 text-xs text-slate-300">{holdReasonLine}<p><span className="text-slate-500">CAB status:</span> {ticket.cab_status}</p><p><span className="text-slate-500">Risk:</span> {ticket.risk_level}</p></div>
 }
 
 function hasDetailFields(ticket) {
   return Boolean(ticket && Array.isArray(ticket.comments) && Array.isArray(ticket.work_notes) && Array.isArray(ticket.knowledge_refs) && Array.isArray(ticket.historical_tickets))
 }
 
-export default function Dashboard() {
+export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown }) {
   const [tickets, setTickets] = useState([])
   const [assignmentGroups, setAssignmentGroups] = useState([])
   const [selectedGroups, setSelectedGroups] = useState(() => new Set())
@@ -83,11 +85,15 @@ export default function Dashboard() {
 
   const assignees = useMemo(() => [...new Set(tickets.map((ticket) => ticket.assignee))].sort(), [tickets])
   const matchingGroups = useMemo(() => assignmentGroups.filter((group) => group.toLowerCase().includes(groupSearch.trim().toLowerCase())), [assignmentGroups, groupSearch])
+  const drilldownTicketIds = useMemo(() => new Set(drilldown?.ticketIds || []), [drilldown])
+  const activeGroups = useMemo(() => drilldown ? new Set(drilldown.assignmentGroups || []) : selectedGroups, [drilldown, selectedGroups])
+  const activeAssignees = useMemo(() => drilldown ? new Set(drilldown.assignees || []) : selectedAssignees, [drilldown, selectedAssignees])
   const visibleTickets = useMemo(() => tickets.filter((ticket) => (
-    selectedGroups.has(ticket.assignment_group)
-    && (activeType === 'ALL' || ticket.type === activeType)
-    && selectedAssignees.has(ticket.assignee)
-  )), [activeType, selectedAssignees, selectedGroups, tickets])
+    activeGroups.has(ticket.assignment_group)
+    && (drilldown || activeType === 'ALL' || ticket.type === activeType)
+    && activeAssignees.has(ticket.assignee)
+    && (!drilldown || drilldownTicketIds.has(ticket.number || ticket.id))
+  )), [activeGroups, activeAssignees, activeType, drilldown, drilldownTicketIds, tickets])
 
   function toggleGroup(group) {
     setSelectedGroups((current) => {
@@ -135,6 +141,7 @@ export default function Dashboard() {
 
   return <section className="mx-auto max-w-7xl px-4 py-10 sm:px-6">
     <div className="apple-hero mb-8"><p className="text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">IT service intelligence</p><h1 className="mt-3 text-4xl font-semibold tracking-tight">Operations, clarified.</h1><p className="mt-3 max-w-2xl text-slate-400">A single, focused view of active IT work—prioritized for timely decisions and confident action.</p></div>
+    {drilldown && <section className="mb-6 flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-cyan-500/40 bg-cyan-950/25 p-4"><div><p className="text-xs font-semibold uppercase tracking-wider text-cyan-200">Stats drill-down</p><p className="mt-1 text-sm font-semibold text-slate-100">{drilldown.title}</p><p className="mt-1 text-xs text-slate-400">{drilldownTicketIds.size} matching ticket{drilldownTicketIds.size === 1 ? '' : 's'} from the executive view.</p></div><div className="flex gap-3"><button type="button" onClick={onClearDrilldown} className="rounded-lg border border-slate-600 px-3 py-2 text-xs font-semibold text-slate-200 hover:bg-slate-800">Clear drill-down</button><button type="button" onClick={onReturnToStats} className="rounded-lg border border-cyan-400/50 bg-cyan-500/10 px-3 py-2 text-xs font-semibold text-cyan-100 hover:bg-cyan-500/20">← Back to Stats</button></div></section>}
     <div className="apple-type-tabs mb-6 flex flex-wrap gap-2 border-b border-slate-800 pb-4" role="tablist" aria-label="Ticket type">{typeTabs.map((tab) => <button key={tab.id} type="button" role="tab" aria-selected={activeType === tab.id} onClick={() => setActiveType(tab.id)} className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${activeType === tab.id ? 'monday-primary' : 'bg-slate-900 text-slate-300 hover:bg-slate-800 hover:text-white'}`}>{tab.label}</button>)}</div>
     <div className="apple-filter mb-4 flex flex-col gap-4 rounded-2xl border border-slate-800 bg-slate-900/60 p-5 lg:flex-row lg:items-end">
       <div ref={groupControlRef} className="relative min-w-0 flex-1"><div className="mb-2 flex items-center justify-between gap-3"><label htmlFor="assignment-group-search" className="text-xs font-semibold uppercase tracking-wider text-slate-400">Assignment Group Search</label><div className="flex gap-3"><button type="button" onClick={selectAllGroups} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">Select All</button><button type="button" onClick={deselectAllGroups} className="text-xs font-semibold text-slate-400 hover:text-slate-100">Deselect All</button><button type="button" onClick={selectMyTeams} className="text-xs font-semibold text-cyan-300 hover:text-cyan-100">My Teams</button></div></div><input id="assignment-group-search" value={groupSearch} onFocus={() => setGroupMenuOpen(true)} onChange={(event) => { setGroupSearch(event.target.value); setGroupMenuOpen(true) }} placeholder="Search enterprise assignment groups…" aria-expanded={groupMenuOpen} aria-controls="assignment-group-menu" className="w-full rounded-lg border border-slate-600 bg-slate-950 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-500 focus:border-cyan-400" />{groupMenuOpen && <div id="assignment-group-menu" className="absolute z-30 mt-2 max-h-64 w-full overflow-y-auto rounded-lg border border-slate-700 bg-slate-900 p-2 shadow-2xl shadow-slate-950/50">{matchingGroups.length ? matchingGroups.map((group) => <label key={group} className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"><input type="checkbox" checked={selectedGroups.has(group)} onChange={() => toggleGroup(group)} className="h-4 w-4 accent-cyan-400" />{group}</label>) : <p className="px-3 py-2 text-sm text-slate-500">No assignment groups match that search.</p>}</div>}</div>

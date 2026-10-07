@@ -42,6 +42,12 @@ ALL_ASSIGNMENT_GROUPS = [
     "SAP PLM Support",
 ]
 
+# The demo uses one authoritative operational reporting period. Records that
+# omit an explicit opened date are deterministically placed within this window
+# so the default queue and executive statistics describe the same population.
+CANONICAL_REPORT_START = date(2026, 7, 1)
+CANONICAL_REPORT_END = date(2026, 10, 6)
+
 
 class ServiceNowJournalEntry(BaseModel):
     """ServiceNow sys_journal_field entry used for comments and work notes."""
@@ -85,6 +91,10 @@ class Ticket(BaseModel):
     opened_on: str = ""
     sap_modules: list[str] = Field(default_factory=list)
     is_breached: bool = False
+    # ServiceNow's hold reason is meaningful only while the record itself is
+    # in the On Hold state. `on_hold_reason` remains only as a compatibility
+    # alias for older mock-data callers.
+    hold_reason: str | None = None
     on_hold_reason: str | None = None
     sla_status: SlaStatus | None = None
     sla_health: HealthColor | None = None
@@ -152,14 +162,21 @@ class Ticket(BaseModel):
         # the previous four months so dashboard analytics behave like a real
         # ServiceNow reporting table rather than frontend fixture data.
         if not self.opened_on:
-            offset = int(hashlib.sha256(self.number.encode()).hexdigest()[:8], 16) % 120
-            self.opened_on = (date(2026, 10, 6) - timedelta(days=offset)).isoformat()
+            # Keep every generated mock record within the same canonical
+            # window used by the default Dashboard and Stats views.
+            window_days = (CANONICAL_REPORT_END - CANONICAL_REPORT_START).days + 1
+            offset = int(hashlib.sha256(self.number.encode()).hexdigest()[:8], 16) % window_days
+            self.opened_on = (CANONICAL_REPORT_END - timedelta(days=offset)).isoformat()
         self.caller_id = self.caller_id or f"{self.assignment_group} Requester"
         self.requested_for = self.requested_for or self.caller_id
         priority_map = {"P1": "1 - Critical", "P2": "2 - High", "P3": "3 - Moderate", "P4": "4 - Low"}
         self.priority = priority_map.get(self.priority, self.priority)
         state_map = {"Fulfillment": "In Progress", "Root Cause Analysis": "Root Cause Analysis"}
         self.state = state_map.get(self.state, self.state)
+        self.hold_reason = self.hold_reason or self.on_hold_reason
+        if self.state != "On Hold":
+            self.hold_reason = None
+        self.on_hold_reason = self.hold_reason
         self.sla_remaining_minutes = self.sla_remaining_minutes if self.sla_remaining_minutes is not None else self.sla_remaining_mins
         # Retain the original field while API consumers migrate to the canonical name.
         self.sla_remaining_mins = self.sla_remaining_minutes
@@ -319,6 +336,25 @@ def _knowledge_references(number: str, title: str) -> list[dict[str, str]]:
             "summary": "Operational context, handover steps, and a recorded walkthrough for first-line resolution.",
         },
     ]
+
+
+def is_sla_breached(ticket: Ticket) -> bool:
+    """Return the single SLA-breach decision used by all ATLAS views.
+
+    Problems and changes do not carry an SLA countdown in this demo; their
+    operational risk is represented separately through phase and risk fields.
+    """
+
+    return ticket.type in {"INC", "RITM"} and (
+        ticket.is_breached
+        or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0)
+    )
+
+
+def effective_hold_reason(ticket: Ticket) -> str | None:
+    """Return a valid ServiceNow hold reason only for an On Hold record."""
+
+    return ticket.hold_reason if ticket.state == "On Hold" else None
 
 
 def calculate_health_color(ticket: Ticket) -> HealthColor:
@@ -601,7 +637,7 @@ MOCK_DB.update({
         description="SAP EWM qRFC queue locking and batch authorization failures are blocking goods issue processing across the warehouse estate.",
         state="In Progress", priority="P1", assignee="Maya Chen", caller_id="Elena Martins", assignment_group="SAP EWM Support",
         is_breached=True, sla_status="BREACHED", sla_remaining_minutes=-18, sla_remaining_percent=15, sentiment="Frustrated",
-        child_ids=["INC0048103", "INC0048109"], linked_problem="PRB0031022", linked_change="CHG0092100",
+        child_ids=["INC0048103", "INC0048109", "INC0048144"], linked_problem="PRB0031022", linked_change="CHG0092100",
         latest_work_notes="L2 isolated the locked qRFC owner and is coordinating the emergency recovery with Basis and Security.",
         comments=[
             {"sys_id": "8102c001000000000000000000000001", "element": "comments", "sys_created_by": "Elena Martins", "sys_created_on": "2026-09-23 08:30:00", "value": "Batch processing for warehouse goods issue failed in SAP EWM. Scanners show an authorization error and an SM12/qRFC queue lock.", "is_customer": True},
@@ -781,6 +817,90 @@ MOCK_DB.update({
         sla_status="AT_RISK", sla_remaining_minutes=72, sentiment="Impatient", latest_work_notes="Basis L2 is validating the import queue lock owner and the approved rollback point before releasing the transport.",
         comments=_journal_thread("INC0048140", requester="Release Management", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="The QA transport import did not complete and the import queue remains locked.", monitoring_check="L1 preserved the transport log and confirmed the lock is isolated to the current QA queue.", business_impact="Release validation cannot proceed until the controlled import is available in QA.", diagnostic_update="Basis L2 is checking the lock owner and approved rollback point before recovery."),
         resources={"KBA": "KBA-BASIS-486 — Transport lock recovery", "Veeva": "Veeva Vault / Release / transport-control", "GDrive": "ATLAS / SAP Basis / transport KT"},
+    ),
+    "INC0048141": Ticket(
+        id="INC0048141", type="INC", record_type="INC", title="SAP PLM Design BOM Classification Routing Failure",
+        description="Engineering design BOM updates are failing to route to the approved material classification queue after a controlled PLM mapping release.", state="In Progress",
+        priority="P2", assignee="Priya Nair", caller_id="Product Engineering", assignment_group="SAP PLM Support", opened_on="2026-08-05",
+        sla_status="AT_RISK", sla_remaining_minutes=68, sentiment="Impatient", linked_problem="PRB0031023", linked_change="CHG0092101",
+        latest_work_notes="PLM L2 isolated a classification-route mismatch and is collecting payload evidence for the linked RCA.",
+        comments=_journal_thread("INC0048141", requester="Product Engineering", l1_support="PLM Service Desk", l2_support="Priya Nair", initial_report="Design BOM classification updates are not reaching the approved downstream material queue.", monitoring_check="L1 confirmed the failure began after the controlled PLM mapping release and captured the payload identifiers.", business_impact="Engineering cannot release the affected BOM revision to manufacturing planning.", diagnostic_update="PLM L2 isolated the classification-route mismatch and opened a linked problem investigation."),
+        resources={"KBA": "KBA-PLM-522 — Design BOM classification routing recovery", "Veeva": "Veeva Vault / PLM / BOM-classification-control", "GDrive": "ATLAS / SAP PLM / BOM classification KT"},
+    ),
+    "INC0048142": Ticket(
+        id="INC0048142", type="INC", record_type="INC", title="SAP PLM Recipe Approval Workflow Scheduler Timeout",
+        description="Recipe approvals are timing out when the PLM background scheduler reaches the configured approval-workflow concurrency limit.", state="On Hold",
+        priority="P2", assignee="Priya Nair", caller_id="Quality Operations", assignment_group="SAP PLM Support", opened_on="2026-09-17",
+        on_hold_reason="Awaiting Change", sla_status="AT_RISK", sla_remaining_minutes=82, sentiment="Impatient", linked_problem="PRB0031024", linked_change="CHG0092102",
+        latest_work_notes="PLM L2 confirmed scheduler contention and is awaiting the controlled capacity change for the workflow worker pool.",
+        comments=_journal_thread("INC0048142", requester="Quality Operations", l1_support="PLM Service Desk", l2_support="Priya Nair", initial_report="Recipe approval tasks are timing out before the quality review can be completed.", monitoring_check="L1 confirmed the scheduler queue rises above the configured approval-workflow threshold during peak review activity.", business_impact="Quality Operations cannot complete the controlled recipe approval cycle for the pending manufacturing release.", diagnostic_update="PLM L2 confirmed scheduler contention and linked the required capacity change."),
+        resources={"KBA": "KBA-PLM-534 — Recipe approval scheduler recovery", "Veeva": "Veeva Vault / PLM / recipe-approval-control", "GDrive": "ATLAS / SAP PLM / recipe workflow KT"},
+    ),
+    "INC0048143": Ticket(
+        id="INC0048143", type="INC", record_type="INC", title="SAP PLM Recipe Approval Reconciliation Waiting for RCA",
+        description="Controlled recipe-approval reconciliation is paused until the linked Problem record confirms the scheduler contention root cause and approved recovery path.", state="On Hold",
+        priority="P2", assignee="Priya Nair", caller_id="Quality Operations", assignment_group="SAP PLM Support",
+        hold_reason="Awaiting Problem", sla_status="AT_RISK", sla_remaining_minutes=74, sentiment="Impatient", linked_problem="PRB0031024",
+        latest_work_notes="PLM L2 completed evidence collection and is awaiting the linked problem RCA before applying a controlled workaround to the affected recipe approvals.",
+        comments=_journal_thread("INC0048143", requester="Quality Operations", l1_support="PLM Service Desk", l2_support="Priya Nair", initial_report="Recipe approvals need reconciliation, but Quality Operations requires the confirmed root cause before the controlled correction can proceed.", monitoring_check="L1 linked the affected approval tasks to the scheduler timeout pattern and attached the audit evidence.", business_impact="The manufacturing release cannot proceed until the recipe approvals are reconciled under the approved quality procedure.", diagnostic_update="PLM L2 placed the incident on hold pending PRB0031024 root-cause confirmation and controlled workaround guidance."),
+        resources={"KBA": "KBA-PLM-534 — Recipe approval scheduler recovery", "Veeva": "Veeva Vault / PLM / recipe-approval-control", "GDrive": "ATLAS / SAP PLM / recipe workflow KT"},
+    ),
+    "INC0048144": Ticket(
+        id="INC0048144", type="INC", record_type="INC", title="SAP EWM Warehouse Recovery Validation Waiting for Parent Incident",
+        description="A dependent warehouse recovery validation remains paused until the primary EWM qRFC incident confirms its controlled queue-unlock recovery state.", state="On Hold",
+        priority="P3", assignee="Maya Chen", caller_id="Warehouse Operations", assignment_group="SAP EWM Support",
+        hold_reason="Awaiting Parent", sla_status="AT_RISK", sla_remaining_minutes=128, sentiment="Calm", parent_id="INC0048102",
+        latest_work_notes="EWM L2 completed local validation preparation and is waiting for the parent qRFC recovery confirmation before releasing the dependent warehouse test.",
+        comments=_journal_thread("INC0048144", requester="Warehouse Operations", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Warehouse recovery validation cannot begin until the parent qRFC incident confirms the queue-unlock recovery status.", monitoring_check="L1 confirmed the local validation evidence is ready and no standalone device fault is present.", business_impact="The dependent warehouse regression test remains paused until the primary incident recovery is confirmed.", diagnostic_update="EWM L2 linked this child incident to INC0048102 and placed it on hold pending the parent recovery confirmation."),
+        resources={"KBA": "KBA003192 — qRFC queue recovery", "Veeva": "Veeva Vault / Warehouse / recovery-validation-control", "GDrive": "ATLAS / SAP EWM / parent-recovery validation KT"},
+    ),
+    "PRB0031023": Ticket(
+        id="PRB0031023", type="PRB", record_type="PRB", title="SAP PLM Classification Route Mapping Regression",
+        description="Problem investigation into a PLM classification-route mapping regression affecting design BOM updates after the controlled mapping release.", state="Root Cause Analysis",
+        priority="P2", assignee="Priya Nair", assignment_group="SAP PLM Support", opened_on="2026-08-06",
+        rca_phase="RCA In Progress", risk_level="High Impact", originating_ticket_ids=["INC0048141", "INC0048125"], linked_change="CHG0092101",
+        latest_work_notes="RCA confirms the release profile omitted an approved classification-route mapping for the engineering BOM object type.",
+        ptasks=[
+            {"id": "PTASK003101", "title": "Compare approved and deployed PLM route mappings", "state": "Closed", "close_notes": "Confirmed the engineering BOM route mapping was omitted from the deployed release profile."},
+            {"id": "PTASK003102", "title": "Validate corrected classification route in QA", "state": "Work in Progress", "comments": [{"sys_created_on": "2026-10-07 09:20:00", "value": "QA validation is running against representative engineering BOM payloads and approved material classes."}]},
+        ],
+        resources={"KBA": "KBA-PLM-522 — Design BOM classification routing recovery", "Veeva": "Veeva Vault / PLM / mapping-RCA", "GDrive": "ATLAS / SAP PLM / classification route analysis"},
+    ),
+    "CHG0092101": Ticket(
+        id="CHG0092101", type="CHG", record_type="CHG", title="SAP PLM Classification Route Mapping Correction",
+        description="Controlled change to restore the approved PLM design BOM classification-route mapping and validate downstream material classification processing.", state="Authorize",
+        priority="P2", assignee="Priya Nair", assignment_group="SAP PLM Support", opened_on="2026-10-01",
+        cab_status="CAB Review Scheduled", risk_level="High Impact", originating_ticket_ids=["PRB0031023"],
+        latest_work_notes="Change evidence, rollback mapping profile, and QA validation plan are prepared for CAB authorization.",
+        ctasks=[
+            {"id": "CTASK003101", "title": "Export current PLM mapping profile", "state": "Closed Complete", "close_notes": "Current mapping profile exported and checksum retained as the approved rollback point."},
+            {"id": "CTASK003102", "title": "Deploy corrected classification route", "state": "Pending", "comments": [{"sys_created_on": "2026-10-07 10:05:00", "value": "Deployment is pending CAB authorization and final QA evidence review."}]},
+        ],
+        resources={"KBA": "KBA-PLM-522 — Design BOM classification routing recovery", "Veeva": "Veeva Vault / Change Control / CHG0092101", "GDrive": "ATLAS / SAP PLM / classification route deployment KT"},
+    ),
+    "PRB0031024": Ticket(
+        id="PRB0031024", type="PRB", record_type="PRB", title="SAP PLM Recipe Workflow Scheduler Contention",
+        description="Root-cause analysis of PLM recipe approval scheduler contention during concurrent quality-review windows.", state="Root Cause Analysis",
+        priority="P2", assignee="Priya Nair", assignment_group="SAP PLM Support", opened_on="2026-09-18",
+        rca_phase="RCA In Progress", risk_level="High Impact", originating_ticket_ids=["INC0048142"], linked_change="CHG0092102",
+        latest_work_notes="RCA identified workflow worker-pool saturation during the quality-review batch window and a missing alert threshold.",
+        ptasks=[
+            {"id": "PTASK003201", "title": "Capture PLM workflow scheduler concurrency profile", "state": "Closed", "close_notes": "Profile confirms worker-pool saturation during concurrent quality-review requests."},
+            {"id": "PTASK003202", "title": "Define scheduler capacity and alert threshold", "state": "Work in Progress", "comments": [{"sys_created_on": "2026-10-07 10:18:00", "value": "Capacity model and alert threshold are being validated against the regulated approval workload."}]},
+        ],
+        resources={"KBA": "KBA-PLM-534 — Recipe approval scheduler recovery", "Veeva": "Veeva Vault / PLM / scheduler-RCA", "GDrive": "ATLAS / SAP PLM / scheduler analysis KT"},
+    ),
+    "CHG0092102": Ticket(
+        id="CHG0092102", type="CHG", record_type="CHG", title="SAP PLM Recipe Workflow Capacity and Alerting Update",
+        description="Controlled change to increase the PLM recipe-approval scheduler capacity and introduce proactive concurrency alerting.", state="Assess",
+        priority="P3", assignee="Priya Nair", assignment_group="SAP PLM Support", opened_on="2026-10-03",
+        cab_status="Assessment In Progress", risk_level="Medium Impact", originating_ticket_ids=["PRB0031024"],
+        latest_work_notes="PLM Support is validating the capacity proposal, alert thresholds, and rollback plan with Quality Operations.",
+        ctasks=[
+            {"id": "CTASK003201", "title": "Validate current recipe approval scheduler baseline", "state": "Closed Complete", "close_notes": "Baseline captured for concurrent review volume, queue wait time, and worker utilization."},
+            {"id": "CTASK003202", "title": "Configure capacity and concurrency alert threshold", "state": "Open", "comments": [{"sys_created_on": "2026-10-07 10:30:00", "value": "Configuration is awaiting the final approved capacity target from the change assessment."}]},
+        ],
+        resources={"KBA": "KBA-PLM-534 — Recipe approval scheduler recovery", "Veeva": "Veeva Vault / Change Control / CHG0092102", "GDrive": "ATLAS / SAP PLM / scheduler capacity KT"},
     ),
 })
 

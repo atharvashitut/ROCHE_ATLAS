@@ -15,7 +15,16 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
 from .central_db import central_knowledge_documents, central_knowledge_summary, central_ticket_by_reference, central_ticket_records
-from .models import ALL_ASSIGNMENT_GROUPS, Ticket, calculate_health_color, resolve_child_tickets
+from .models import (
+    ALL_ASSIGNMENT_GROUPS,
+    CANONICAL_REPORT_END,
+    CANONICAL_REPORT_START,
+    Ticket,
+    calculate_health_color,
+    effective_hold_reason,
+    is_sla_breached,
+    resolve_child_tickets,
+)
 from .rag_engine import initialize_vector_db, query_hybrid_rag, rag_status
 
 
@@ -28,12 +37,15 @@ class ChatQuery(BaseModel):
 def classify_breach_reason(ticket: Ticket) -> str:
     """Classify incident breach ownership using the standard ServiceNow rules."""
 
-    if ticket.on_hold_reason == "Awaiting Vendor":
+    hold_reason = effective_hold_reason(ticket)
+    if hold_reason == "Awaiting Vendor":
         return "BR_INC_Vendor Dependency"
-    if ticket.on_hold_reason in {"Awaiting Caller", "Awaiting User", "Awaiting Customer"}:
+    if hold_reason in {"Awaiting Caller", "Awaiting User", "Awaiting Customer"}:
         return "BR_INC_To's and Fro's b/w user and assignee"
-    if ticket.on_hold_reason in {"Awaiting Change", "Awaiting Problem"}:
+    if hold_reason in {"Awaiting Change", "Awaiting Problem"}:
         return "BR_INC_Change/Problem Dependency"
+    if hold_reason == "Awaiting Parent":
+        return "BR_INC_Parent Dependency"
     return "BR_INC_Delayed By Assignee"
 
 
@@ -42,7 +54,11 @@ def ticket_payload(ticket: Ticket) -> dict:
         **ticket.model_dump(),
         "health_color": calculate_health_color(ticket),
         "customer_sentiment": calculate_customer_sentiment(ticket),
-        "breach_reason": classify_breach_reason(ticket) if ticket.is_breached else None,
+        "is_breached": is_sla_breached(ticket),
+        "breach_reason": classify_breach_reason(ticket) if is_sla_breached(ticket) else None,
+        "hold_reason": effective_hold_reason(ticket),
+        # Compatibility alias; all first-party UI now reads hold_reason.
+        "on_hold_reason": effective_hold_reason(ticket),
         # Preserve the internal workflow stage while exposing the ServiceNow
         # executive RED/YELLOW/GREEN SLA contract to every client.
         "sla_workflow_status": ticket.sla_status,
@@ -181,10 +197,11 @@ def chat_response(query: ChatQuery) -> str:
         title = ticket.title if ticket else "the reported service issue"
         return f"RCA draft{context}: The observed impact is {title}. The mock evidence points to a policy claim mapping regression. Correct the mapping, validate token refresh, and add a pre-release claim validation control."
     if ticket:
-        context = f"{ticket.id} ({ticket.type}) is {ticket.state}, assigned to {ticket.assignee} in {ticket.assignment_group}."
+        hold_context = f" (hold reason: {effective_hold_reason(ticket)})" if effective_hold_reason(ticket) else ""
+        context = f"{ticket.id} ({ticket.type}) is {ticket.state}{hold_context}, assigned to {ticket.assignee} in {ticket.assignment_group}."
         if ticket.type in {"INC", "RITM"}:
             customer_sentiment = calculate_customer_sentiment(ticket)
-            sla_summary = f"SLA is breached by {abs(ticket.sla_remaining_minutes or 0)} minutes" if ticket.is_breached or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0) else f"SLA has {ticket.sla_remaining_minutes} minutes remaining"
+            sla_summary = f"SLA is breached by {abs(ticket.sla_remaining_minutes or 0)} minutes" if is_sla_breached(ticket) else f"SLA has {ticket.sla_remaining_minutes} minutes remaining"
             return f"{context} {sla_summary} and customer sentiment is {customer_sentiment['status']} ({customer_sentiment['score_pct']}%). Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
         if ticket.type == "PRB":
             return f"{context} RCA phase is {ticket.prb_phase} and risk level is {ticket.risk_level}. Health is {calculate_health_color(ticket)}. Resolution guide: {ticket.ai_resolution_guide}"
@@ -241,9 +258,8 @@ def get_dashboard_stats(
 ) -> dict[str, object]:
     """Return canonical ServiceNow-style operational analytics for the Stats tab."""
 
-    report_end = end_date or date(2026, 10, 6)
-    four_month_window_start = (report_end.year * 12 + report_end.month - 1) - 3
-    report_start = start_date or date(four_month_window_start // 12, four_month_window_start % 12 + 1, 1)
+    report_end = end_date or CANONICAL_REPORT_END
+    report_start = start_date or CANONICAL_REPORT_START
     if report_start > report_end:
         raise HTTPException(status_code=422, detail="start_date must be on or before end_date")
 
@@ -260,7 +276,7 @@ def get_dashboard_stats(
     record_types = ("INC", "RITM", "PRB", "CHG")
     type_colors = {"INC": "#38bdf8", "RITM": "#8b5cf6", "PRB": "#f59e0b", "CHG": "#10b981"}
     on_hold = [ticket for ticket in tickets if ticket.state == "On Hold"]
-    awaiting_counts = Counter(ticket.on_hold_reason or "Not classified" for ticket in on_hold)
+    awaiting_counts = Counter(effective_hold_reason(ticket) or "Not classified" for ticket in on_hold)
     state_counts = Counter("On Hold" if ticket.state == "On Hold" else "In Progress" for ticket in tickets if ticket.state == "On Hold" or ticket.state in active_states)
     type_pipeline = [
         {
@@ -268,15 +284,15 @@ def get_dashboard_stats(
             "total": sum(ticket.type == record_type for ticket in tickets),
             "active": sum(ticket.type == record_type and ticket.state not in closed_states for ticket in tickets),
             "closed": sum(ticket.type == record_type and ticket.state in closed_states for ticket in tickets),
-            "breached": sum(ticket.type == record_type and ticket.is_breached for ticket in tickets),
+            "breached": sum(ticket.type == record_type and is_sla_breached(ticket) for ticket in tickets),
             "color": type_colors[record_type],
         }
         for record_type in record_types
     ]
     sla_eligible = [ticket for ticket in tickets if ticket.type in {"INC", "RITM"}]
-    sla_breached = sum(ticket.is_breached or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0) for ticket in sla_eligible)
+    sla_breached = sum(is_sla_breached(ticket) for ticket in sla_eligible)
     sla_at_risk = sum(
-        not ticket.is_breached
+        not is_sla_breached(ticket)
         and (ticket.sla_status == "AT_RISK" or (ticket.sla_remaining_minutes is not None and 0 < ticket.sla_remaining_minutes <= 90))
         for ticket in sla_eligible
     )
@@ -316,7 +332,7 @@ def get_dashboard_stats(
     def is_at_risk(ticket: Ticket) -> bool:
         return (
             ticket.type in {"INC", "RITM"}
-            and not ticket.is_breached
+            and not is_sla_breached(ticket)
             and (ticket.sla_status == "AT_RISK" or (ticket.sla_remaining_minutes is not None and 0 < ticket.sla_remaining_minutes <= 90))
         )
 
@@ -330,7 +346,7 @@ def get_dashboard_stats(
         if not group_tickets:
             continue
         group_sla = [ticket for ticket in group_tickets if ticket.type in {"INC", "RITM"}]
-        breached = sum(ticket.is_breached or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0) for ticket in group_sla)
+        breached = sum(is_sla_breached(ticket) for ticket in group_sla)
         at_risk = sum(is_at_risk(ticket) for ticket in group_sla)
         active_tickets = [ticket for ticket in group_tickets if ticket.state not in closed_states]
         resolved = sum(ticket.state in closed_states for ticket in group_tickets)
@@ -358,7 +374,7 @@ def get_dashboard_stats(
             "assignee": assignee,
             "active": sum(ticket.state not in closed_states for ticket in assignee_tickets),
             "total": len(assignee_tickets),
-            "breached": sum(ticket.is_breached or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0) for ticket in assignee_tickets if ticket.type in {"INC", "RITM"}),
+            "breached": sum(is_sla_breached(ticket) for ticket in assignee_tickets),
             "at_risk": sum(is_at_risk(ticket) for ticket in assignee_tickets),
             "assignment_groups": sorted({ticket.assignment_group for ticket in assignee_tickets}),
         }
@@ -387,12 +403,16 @@ def get_dashboard_stats(
             "awaiting_change": awaiting_counts["Awaiting Change"],
             "awaiting_child": awaiting_counts["Awaiting Child"],
             "awaiting_vendor": awaiting_counts["Awaiting Vendor"],
+            "awaiting_problem": awaiting_counts["Awaiting Problem"],
+            "awaiting_parent": awaiting_counts["Awaiting Parent"],
         },
         "awaiting_breakdown": [
             {"label": "Awaiting Caller", "value": awaiting_counts["Awaiting Caller"], "color": "#f59e0b"},
             {"label": "Awaiting Change", "value": awaiting_counts["Awaiting Change"], "color": "#2563eb"},
             {"label": "Awaiting Child", "value": awaiting_counts["Awaiting Child"], "color": "#8b5cf6"},
             {"label": "Awaiting Vendor", "value": awaiting_counts["Awaiting Vendor"], "color": "#ec4899"},
+            {"label": "Awaiting Problem", "value": awaiting_counts["Awaiting Problem"], "color": "#14b8a6"},
+            {"label": "Awaiting Parent", "value": awaiting_counts["Awaiting Parent"], "color": "#64748b"},
         ],
         "work_state_breakdown": [
             {"label": "In Progress", "value": state_counts["In Progress"], "color": "#10b981"},
@@ -412,7 +432,7 @@ def get_dashboard_stats(
                 "group": group,
                 "total": sum(ticket.assignment_group == group for ticket in tickets),
                 "active": sum(ticket.assignment_group == group and ticket.state not in closed_states for ticket in tickets),
-                "breached": sum(ticket.assignment_group == group and ticket.is_breached for ticket in tickets),
+                "breached": sum(ticket.assignment_group == group and is_sla_breached(ticket) for ticket in tickets),
             }
             for group in visible_groups
             if any(ticket.assignment_group == group for ticket in tickets)
@@ -426,6 +446,22 @@ def get_dashboard_stats(
         "incident_trend": {"groups": visible_groups, "series": trend},
         "available_groups": ALL_ASSIGNMENT_GROUPS,
         "available_assignees": sorted({ticket.assigned_to for ticket in central_ticket_records().values()}),
+        # The executive UI uses this compact canonical index for chart
+        # drill-downs. Full details are still fetched only through /api/tickets.
+        "ticket_index": [
+            {
+                "number": ticket.number,
+                "type": ticket.type,
+                "state": ticket.state,
+                "assignment_group": ticket.assignment_group,
+                "assignee": ticket.assigned_to,
+                "opened_on": ticket.opened_on,
+                "is_breached": is_sla_breached(ticket),
+                "sla_health": ticket.sla_health,
+                "hold_reason": effective_hold_reason(ticket),
+            }
+            for ticket in tickets
+        ],
     }
 
 

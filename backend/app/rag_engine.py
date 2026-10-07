@@ -247,7 +247,17 @@ def rag_status() -> dict[str, object]:
     """Operational status for local vector retrieval and connector readiness."""
 
     initialize_vector_db()
-    return {"vector_store": VECTOR_STORE.status(), "connectors": connector_statuses(), "generation_model": GENERATION_MODEL if gemini_client is not None else "local-grounded-fallback"}
+    return {
+        "vector_store": VECTOR_STORE.status(),
+        "connectors": connector_statuses(),
+        "generation": {
+            "provider": "Google Gemini",
+            "configured": gemini_client is not None,
+            "api_key_environment": "GEMINI_API_KEY",
+            "model": GENERATION_MODEL,
+            "fallback": "local-grounded-fallback",
+        },
+    }
 
 
 # Compatibility aliases for older endpoints and integrations.

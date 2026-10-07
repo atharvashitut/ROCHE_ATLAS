@@ -1,2 +1,8 @@
 .atlas-vector-db/
 backend/.atlas-vector-db/
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
