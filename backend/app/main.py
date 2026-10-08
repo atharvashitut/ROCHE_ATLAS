@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 import re
 from typing import Literal
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
+from .agent_intelligence import analyze_assignment_group_workload, analyze_assignee_workload, analyze_ticket
 from .central_db import central_knowledge_documents, central_knowledge_summary, central_ticket_by_reference, central_ticket_records
 from .models import (
     ALL_ASSIGNMENT_GROUPS,
@@ -25,7 +26,7 @@ from .models import (
     is_sla_breached,
     resolve_child_tickets,
 )
-from .rag_engine import initialize_vector_db, query_hybrid_rag, rag_status
+from .rag_engine import compose_conversational_ticket_response, initialize_vector_db, query_hybrid_rag, rag_status, retrieve_vector_context
 
 
 class ChatQuery(BaseModel):
@@ -49,7 +50,7 @@ def classify_breach_reason(ticket: Ticket) -> str:
     return "BR_INC_Delayed By Assignee"
 
 
-def ticket_payload(ticket: Ticket) -> dict:
+def ticket_payload(ticket: Ticket, include_agent_analysis: bool = False) -> dict:
     payload = {
         **ticket.model_dump(),
         "health_color": calculate_health_color(ticket),
@@ -65,6 +66,7 @@ def ticket_payload(ticket: Ticket) -> dict:
         "sla_status": ticket.sla_health,
         "sla_time_remaining": ticket.sla_time_remaining,
         "module": ticket.sap_modules[0] if ticket.sap_modules else "Enterprise ITSM",
+        "ai_insight": build_ticket_ai_insight(ticket),
     }
     if ticket.type == "INC":
         children = resolve_child_tickets(ticket)
@@ -72,6 +74,31 @@ def ticket_payload(ticket: Ticket) -> dict:
         # to child_tickets. Both are hydrated from the same canonical records.
         payload["child_tickets"] = children
         payload["child_incidents"] = children
+    if include_agent_analysis:
+        try:
+            relationship_numbers = {
+                str(record.get("number", ""))
+                for record in (ticket.parent_incident, ticket.linked_prb, ticket.linked_chg, *ticket.originating_tickets)
+                if record and record.get("number")
+            }
+            relationship_numbers.update(ticket.child_ids)
+            related_records = [
+                related for number in relationship_numbers
+                if number and (related := central_ticket_by_reference(number)) is not None
+            ]
+            agent_analysis = analyze_ticket(ticket, related_records, retrieve_vector_context(ticket.number, limit=4))
+            payload["agent_analysis"] = agent_analysis
+            payload["ai_insight"] = {
+                **payload["ai_insight"],
+                "resolution_summary": f"{agent_analysis['current_impact']} {agent_analysis['likely_contributing_factor']}",
+                "resolution_actions": agent_analysis["recommended_next_steps"],
+                "recommended_actions": agent_analysis["recommended_next_steps"],
+                "confidence_score": agent_analysis["confidence_score"],
+            }
+        except Exception:
+            # Agent analysis is optional advisory intelligence. A retrieval or
+            # analysis failure must never break the canonical ticket response.
+            payload["agent_analysis"] = None
     return payload
 
 
@@ -106,6 +133,333 @@ def calculate_customer_sentiment(ticket: Ticket) -> dict[str, object]:
     trigger = f"urgent caller phrasing ({', '.join(repr(keyword) for keyword in matched)})" if matched else "no urgency keywords in the latest caller update"
     sla_clause = f" and low SLA time remaining ({ticket.sla_remaining_percent}%)" if low_sla else ""
     return {"status": status, "score_pct": score, "explanation": f"Triggered by {trigger}{sla_clause}."}
+
+
+def technical_resolution_actions(ticket: Ticket) -> list[dict[str, str]]:
+    """Return concise, module-aware L2/L3 diagnostic and resolution steps.
+
+    The steps are generated from the canonical ServiceNow record's SAP module
+    tags and description.  Conditional routing is deliberately explicit so a
+    drawer briefing can be followed safely without treating it as permission
+    to make an unapproved production change.
+    """
+
+    text = " ".join([
+        ticket.short_description,
+        ticket.description,
+        " ".join(entry.value for entry in ticket.comments),
+        " ".join(entry.value for entry in ticket.work_notes),
+    ]).casefold()
+    actions: list[dict[str, str]] = []
+
+    def add(action: str, why: str) -> None:
+        if not any(existing["action"] == action for existing in actions):
+            actions.append({"action": action, "why": why})
+
+    if "SAP BASIS" in ticket.sap_modules and any(term in text for term in ("sm37", "abap dump", "batch job", "background job")):
+        add(
+            "Review SM37, ST22, and the job spool before restart",
+            "Capture job log, ABAP dump, variant, technical user, and client so SAP Basis can distinguish a data issue from a platform failure.",
+        )
+    if "SAP EWM" in ticket.sap_modules:
+        add(
+            "Capture lock ownership in SM12 before intervention",
+            "Record the lock owner, client, object, and age; do not remove an active lock until ownership is confirmed.",
+        )
+        add(
+            "Inspect qRFC queues in SMQ1 and SMQ2",
+            "Check outbound and inbound queue status, destination, LUW error text, retries, and predecessor blocks before a controlled restart.",
+        )
+        add(
+            "Validate warehouse recovery in /SCWM/MON",
+            "After the approved queue action, confirm warehouse task processing and a representative goods issue without a re-lock.",
+        )
+    if "SAP Security" in ticket.sap_modules or any(term in text for term in ("authorization", "token", "su53", "m_mseg")):
+        add(
+            "Run SU53 for the affected user or technical batch user",
+            "If the trace shows a missing authorization object, route the evidence to Identity & Access Management for the approved role correction; do not grant broad access as a workaround.",
+        )
+    if "SAP BASIS" in ticket.sap_modules:
+        if any(term in text for term in ("rf", "gateway", "timeout", "connection")):
+            add(
+                "Check SMICM and SMGW for node-specific gateway errors",
+                "Confirm whether the RF timeout is isolated to one node, connection pool, or certificate path before a controlled restart.",
+            )
+        add(
+            "Verify the SAP client context before changing technical settings",
+            "If the evidence names client 000, raise the controlled investigation with SAP Basis; client 000 changes require Basis ownership and approved change control.",
+        )
+    if "SAP PLM" in ticket.sap_modules:
+        add(
+            "Review the PLM specification or recipe in CG03/CG02",
+            "Confirm the affected specification or recipe version, status, and classification values before attempting a resynchronization.",
+        )
+        add(
+            "Trace the PLM integration payload and queue",
+            "Compare the failed payload mapping with the Material Master classification target, then capture queue or middleware errors for the integration owner.",
+        )
+        add(
+            "Reprocess only after mapping and approval checks pass",
+            "Use the controlled PLM procedure to validate the synchronization result and preserve GxP evidence.",
+        )
+    if "SAP MM" in ticket.sap_modules:
+        add(
+            "Inspect the purchasing document in ME23N and workflow history in SWI1",
+            "Confirm the release strategy, approver step, and any workflow error before restarting or re-routing approval.",
+        )
+        add(
+            "Validate Material Master and authorization prerequisites",
+            "If the workflow or classification data is valid but access fails, attach the SU53 trace and route the correction to the authorization owner.",
+        )
+    if "SAP SD" in ticket.sap_modules or "SAP FICO" in ticket.sap_modules:
+        add(
+            "Inspect the billing error in VFX3 and the billing document in VF03",
+            "Capture the blocked billing reason, tax determination message, and account assignment context before any reposting.",
+        )
+        add(
+            "Validate tax and posting configuration with the SD/FICO owner",
+            "Correct mapping through approved transport control, then retest one representative billing document and reconcile the FI posting.",
+        )
+    if "SAP Middleware" in ticket.sap_modules:
+        add(
+            "Review the interface message and retry history in the middleware monitor",
+            "Identify the failing payload, endpoint, and retry pattern; preserve evidence before replaying or clearing a message.",
+        )
+    if ticket.type == "PRB":
+        add(
+            "Attach diagnostic evidence to the RCA task before proposing the permanent fix",
+            "The problem record should distinguish the observed symptom, technical cause, and validated corrective action.",
+        )
+    if ticket.type == "CHG":
+        add(
+            "Complete open change tasks and record validation evidence",
+            "Close implementation tasks only after the agreed technical and business checks pass, with rollback evidence retained.",
+        )
+    return actions
+
+
+def build_ticket_ai_insight(ticket: Ticket) -> dict[str, object]:
+    """Build a concise, deterministic explanation for the drawer AI insight.
+
+    This intentionally uses the same native ServiceNow fields that drive the
+    queue and Stats tab.  It is an explainable operational aid, not an opaque
+    model score.
+    """
+
+    sentiment = calculate_customer_sentiment(ticket)
+    related = [
+        record["number"]
+        for record in (ticket.parent_incident, ticket.linked_prb, ticket.linked_chg, *ticket.originating_tickets)
+        if record and record.get("number")
+    ]
+    evidence: list[str] = [f"State: {ticket.state}", f"Assignment group: {ticket.assignment_group}"]
+    reasoning: list[str] = []
+    recommendations: list[dict[str, str]] = []
+    resolution_actions: list[dict[str, str]] = []
+    has_canonical_plan = bool(ticket.ai_resolution_steps)
+    confidence = 72
+
+    resolution_actions.extend(ticket.ai_resolution_steps or technical_resolution_actions(ticket))
+    if not resolution_actions:
+        resolution_actions.append({
+            "action": "Execute the approved remediation and validate recovery",
+            "why": ticket.ai_resolution_guide,
+        })
+
+    def recommend(action: str, why: str) -> None:
+        """Add generic operational advice only when a canonical plan is absent."""
+
+        if not has_canonical_plan:
+            recommendations.append({"action": action, "why": why})
+
+    if ticket.type in {"INC", "RITM"}:
+        if is_sla_breached(ticket):
+            overdue = abs(ticket.sla_remaining_minutes or 0)
+            reasoning.append("The SLA is already breached, so customer impact needs immediate ownership.")
+            evidence.append(f"SLA: breached by {overdue} minutes")
+            recommend("Escalate remediation ownership", "The agreed response target has already been missed.")
+            confidence += 16
+        elif ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 90:
+            reasoning.append("The remaining SLA window is below the operational at risk threshold.")
+            evidence.append(f"SLA: {ticket.sla_remaining_minutes} minutes remaining")
+            recommend("Prioritize the next remediation step", "Early intervention reduces the chance of a breach.")
+            confidence += 10
+        if sentiment["status"] in {"Frustrated", "Impatient"}:
+            reasoning.append("Recent caller language signals elevated business urgency.")
+            evidence.append(f"Customer sentiment: {sentiment['status']} ({sentiment['score_pct']}%)")
+            recommend("Confirm the recovery plan with the requester", "The caller journal indicates active business impact.")
+            confidence += 8
+    if ticket.state == "On Hold":
+        hold_reason = effective_hold_reason(ticket) or "a dependency"
+        reasoning.append(f"Progress is constrained by {hold_reason.lower()}.")
+        evidence.append(f"On hold reason: {hold_reason}")
+        recommend("Clear or formally hand off the blocking dependency", f"The record cannot advance while {hold_reason.lower()} remains open.")
+        confidence += 5
+    if ticket.type == "PRB" and any(task.get("state") not in {"Closed", "Canceled"} for task in ticket.ptasks):
+        reasoning.append("Open problem tasks show that root cause investigation is incomplete.")
+        evidence.append(f"Open PTasks: {sum(task.get('state') not in {'Closed', 'Canceled'} for task in ticket.ptasks)}")
+        recommend("Complete the active root cause analysis task", "The related problem has active investigation work remaining.")
+        confidence += 6
+    if ticket.type == "CHG" and any(not str(task.get("state", "")).startswith("Closed") for task in ticket.ctasks):
+        reasoning.append("Implementation work remains open on the linked change.")
+        evidence.append(f"Open CTasks: {sum(not str(task.get('state', '')).startswith('Closed') for task in ticket.ctasks)}")
+        recommend("Complete and evidence the open change tasks", "Open implementation tasks are the active delivery constraint.")
+        confidence += 6
+    if ticket.similar_records or ticket.historical_tickets:
+        reasoning.append("A historical or ongoing similarity match provides a reusable resolution path.")
+        evidence.append(f"Similarity matches: {len(ticket.similar_records) + len(ticket.historical_tickets)}")
+        recommend("Reuse the matched resolution evidence", "A related record may shorten diagnosis and avoid duplicate effort.")
+        confidence += 4
+    if not reasoning:
+        reasoning.append("The record has no detected breach, blocked dependency, or unfinished delivery task.")
+        recommend("Validate recovery and close with evidence", "No elevated operational signal is present in the current record.")
+    if related:
+        evidence.append(f"Related records: {', '.join(related[:3])}")
+
+    deduplicated_actions: list[dict[str, str]] = []
+    seen_actions: set[str] = set()
+    for recommendation in [*resolution_actions, *recommendations]:
+        if recommendation["action"] not in seen_actions:
+            deduplicated_actions.append(recommendation)
+            seen_actions.add(recommendation["action"])
+    return {
+        "reasoning": reasoning[:3],
+        "supporting_evidence": evidence[:5],
+        "related_events": related[:4] or ["No linked ServiceNow work item is recorded."],
+        "confidence_score": min(confidence, 98),
+        "recommended_actions": deduplicated_actions[:5],
+        "resolution_summary": ticket.ai_resolution_summary or ticket.ai_resolution_guide,
+        "resolution_actions": deduplicated_actions[:5],
+    }
+
+
+def detect_incident_anomalies(tickets: list[Ticket], report_start: date, report_end: date) -> dict[str, object]:
+    """Detect transparent incident-pattern anomalies from canonical records.
+
+    The detector compares the most recent 30-day period with the preceding
+    reporting window.  It evaluates volume, P1/P2 concentration, category,
+    and business-service patterns, returning the underlying record IDs so the
+    UI can drill into the exact evidence rather than displaying a black-box
+    score.
+    """
+
+    incidents = [ticket for ticket in tickets if ticket.type == "INC"]
+    if not incidents:
+        return {"summary": {"total": 0, "high": 0, "medium": 0, "impacted_tickets": 0}, "insights": []}
+
+    range_days = max(1, (report_end - report_start).days + 1)
+    recent_days = min(30, max(7, range_days // 3))
+    recent_start = report_end - timedelta(days=recent_days - 1)
+    recent = [ticket for ticket in incidents if date.fromisoformat(ticket.opened_on) >= recent_start]
+    baseline = [ticket for ticket in incidents if date.fromisoformat(ticket.opened_on) < recent_start]
+    baseline_days = max(1, (recent_start - report_start).days)
+    insights: list[dict[str, object]] = []
+
+    def is_high_priority(ticket: Ticket) -> bool:
+        return ticket.priority.startswith("1 -") or ticket.priority.startswith("2 -")
+
+    def add_insight(
+        *,
+        kind: str,
+        severity: str,
+        title: str,
+        current: int,
+        expected: float,
+        impacted: list[Ticket],
+        explanation: str,
+        recommendation: str,
+        recommendation_reason: str,
+    ) -> None:
+        if not impacted:
+            return
+        impacted_ids = {ticket.number for ticket in impacted}
+        # A single cluster can appear through multiple dimensions (for
+        # example, a PLM assignment group and its owning business service).
+        # Keep one executive insight per identical evidence set instead of
+        # flooding leaders with differently named copies of the same signal.
+        if any(set(existing["ticket_ids"]) == impacted_ids for existing in insights):
+            return
+        ratio = current / max(expected, 0.5)
+        confidence = min(97, max(72, round(68 + min(ratio, 3) * 9 + min(current, 5) * 2)))
+        insights.append({
+            "id": f"{kind}-{len(insights) + 1}",
+            "kind": kind,
+            "severity": severity,
+            "title": title,
+            "current_count": current,
+            "expected_count": round(expected, 1),
+            "delta_pct": round(max(0, ((current - expected) / max(expected, 0.5)) * 100)),
+            "explanation": explanation,
+            "supporting_evidence": [
+                f"{current} incident{'s' if current != 1 else ''} in the most recent {recent_days} days",
+                f"Expected baseline: {expected:.1f} over an equivalent period",
+                f"Impacted assignment groups: {', '.join(sorted({ticket.assignment_group for ticket in impacted}))}",
+            ],
+            "related_events": sorted({ticket.linked_chg.get('number') for ticket in impacted if ticket.linked_chg} | {ticket.linked_prb.get('number') for ticket in impacted if ticket.linked_prb}),
+            "confidence_score": confidence,
+            "recommended_action": recommendation,
+            "recommendation_reason": recommendation_reason,
+            "ticket_ids": sorted(impacted_ids),
+        })
+
+    dimensions = (
+        ("assignment_group", lambda ticket: ticket.assignment_group, "assignment group"),
+        ("category", lambda ticket: ticket.category, "category"),
+        ("business_service", lambda ticket: ticket.business_service, "business service"),
+    )
+    for kind, selector, label in dimensions:
+        recent_by_value: dict[str, list[Ticket]] = {}
+        baseline_by_value: Counter[str] = Counter()
+        for ticket in recent:
+            recent_by_value.setdefault(selector(ticket), []).append(ticket)
+        for ticket in baseline:
+            baseline_by_value[selector(ticket)] += 1
+        for value, impacted in recent_by_value.items():
+            current = len(impacted)
+            expected = baseline_by_value[value] * recent_days / baseline_days
+            if current >= 2 and (expected < 1 or current >= max(2, expected * 1.6)):
+                severity = "HIGH" if current >= 3 or current >= expected * 2.5 else "MEDIUM"
+                add_insight(
+                    kind=f"{kind}_spike",
+                    severity=severity,
+                    title=f"Unusual {value} incident pattern",
+                    current=current,
+                    expected=expected,
+                    impacted=impacted,
+                    explanation=f"{value} generated {current} incidents in the latest {recent_days}-day window, above its expected baseline of {expected:.1f}.",
+                    recommendation="Investigate a recent Change" if any(ticket.linked_chg for ticket in impacted) else "Create a Problem record",
+                    recommendation_reason="The clustered pattern is stronger than the prior reporting trend and should be investigated as a common cause.",
+                )
+
+    recent_high_priority = [ticket for ticket in recent if is_high_priority(ticket)]
+    baseline_high_priority = [ticket for ticket in baseline if is_high_priority(ticket)]
+    expected_high_priority = len(baseline_high_priority) * recent_days / baseline_days
+    if len(recent_high_priority) >= 2 and (expected_high_priority < 1 or len(recent_high_priority) >= max(2, expected_high_priority * 1.5)):
+        add_insight(
+            kind="p1_p2_spike",
+            severity="HIGH",
+            title="Elevated P1/P2 incident concentration",
+            current=len(recent_high_priority),
+            expected=expected_high_priority,
+            impacted=recent_high_priority,
+            explanation=f"{len(recent_high_priority)} P1/P2 incidents were opened in the latest {recent_days} days, compared with an expected {expected_high_priority:.1f}.",
+            recommendation="Escalate the incident cluster",
+            recommendation_reason="The concentration of high-priority incidents creates a material service-risk pattern.",
+        )
+
+    insights.sort(key=lambda item: (item["severity"] == "HIGH", item["delta_pct"], item["current_count"]), reverse=True)
+    insights = insights[:6]
+    impacted_ticket_ids = {ticket_id for insight in insights for ticket_id in insight["ticket_ids"]}
+    return {
+        "summary": {
+            "total": len(insights),
+            "high": sum(insight["severity"] == "HIGH" for insight in insights),
+            "medium": sum(insight["severity"] == "MEDIUM" for insight in insights),
+            "impacted_tickets": len(impacted_ticket_ids),
+            "analysis_window": {"start_date": recent_start.isoformat(), "end_date": report_end.isoformat(), "days": recent_days},
+        },
+        "insights": insights,
+    }
 
 
 def find_ticket_by_reference(ticket_reference: str) -> Ticket | None:
@@ -383,6 +737,17 @@ def get_dashboard_stats(
     team_sla_health.sort(key=lambda item: (item["breached"], item["at_risk"], item["sla_eligible"]), reverse=True)
     team_status_call.sort(key=lambda item: (item["breached"], item["at_risk"], item["average_backlog_age_days"]), reverse=True)
     assignee_workload.sort(key=lambda item: (item["breached"], item["at_risk"], item["active"]), reverse=True)
+    anomaly_detection = detect_incident_anomalies(tickets, report_start, report_end)
+    try:
+        assignment_group_agent = analyze_assignment_group_workload(tickets, anomaly_detection["insights"])
+    except Exception:
+        # Preserve Stats and the existing anomaly detector if advisory analysis
+        # encounters an unexpected malformed mock record.
+        assignment_group_agent = {"agent": "assignment_group_investigator", "findings": [], "summary": ""}
+    try:
+        assignee_agent = analyze_assignee_workload(tickets, assignee[0], report_end) if len(set(assignee)) == 1 else None
+    except Exception:
+        assignee_agent = None
     return {
         "filters": {
             "assignment_groups": sorted(selected_groups),
@@ -441,6 +806,9 @@ def get_dashboard_stats(
         "assignee_workload": assignee_workload,
         "team_status_call": team_status_call,
         "work_item_trend": {"groups": visible_groups, "series": trend},
+        "anomaly_detection": anomaly_detection,
+        "assignment_group_agent": assignment_group_agent,
+        "assignee_agent": assignee_agent,
         # Kept for compatibility with older clients; the executive cockpit
         # uses work_item_trend so Changes, Problems, and Requests are included.
         "incident_trend": {"groups": visible_groups, "series": trend},
@@ -497,7 +865,7 @@ def get_ticket(ticket_id: str) -> dict[str, dict]:
     ticket = find_ticket_by_reference(ticket_id)
     if ticket is None:
         raise HTTPException(status_code=404, detail=f"Ticket {ticket_id} was not found")
-    return {"ticket": ticket_payload(ticket)}
+    return {"ticket": ticket_payload(ticket, include_agent_analysis=True)}
 
 
 @app.post("/api/chat/query")
@@ -511,12 +879,17 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         (ticket_id for ticket_id in ticket_db if ticket_id in query_text),
         None,
     )
-    found_id = found_id or find_ticket_from_natural_language(query_text)
     rag_result = query_hybrid_rag(query.message)
+    ticket_list_intent = rag_result.get("intent") == "active_ticket_list" and not query.ticket_id
+    if not ticket_list_intent:
+        found_id = found_id or find_ticket_from_natural_language(query_text)
     # Semantic retrieval resolves conversational references that are not a
     # literal ServiceNow number. The selected record is still hydrated from
     # the canonical MOCK_DB-backed repository below.
-    found_id = found_id or next((ticket_id for ticket_id in rag_result["ticket_ids"] if ticket_id in ticket_db), None)
+    if not ticket_list_intent:
+        found_id = found_id or next((ticket_id for ticket_id in rag_result["ticket_ids"] if ticket_id in ticket_db), None)
+    else:
+        found_id = None
     rca_intent = "RCA" in query_text or "ROOT CAUSE" in query_text
     cr_intent = bool(re.search(r"\bCR\b", query_text)) or "CHANGE" in query_text
 
@@ -536,8 +909,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
     if action == "chat":
         response = rag_result["answer"]
         if ticket:
-            ticket_context = chat_response(normalized_query)
-            response = f"Here is the information for {ticket.id}: {ticket_context}\n\n{response}"
+            response = compose_conversational_ticket_response(ticket, query.message, response)
     if ticket and ticket.similar_records:
         response = "⚠️ **AI Similarity Detection Triggered:** I found historical patterns matching this issue.\n\n" + response
     return {
@@ -545,7 +917,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "action": action,
         "ticket_id": normalized_id,
         "generated_content": response if action != "chat" else None,
-        "ticket": ticket_payload(ticket) if ticket else None,
+        "ticket": ticket_payload(ticket, include_agent_analysis=True) if ticket else None,
         "ai_resolution_guide": ticket.ai_resolution_guide if ticket else None,
         "knowledge_refs": ticket.knowledge_refs if ticket else [],
         "topology": topology_payload(ticket) if ticket else None,
@@ -555,6 +927,8 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "fallback_reasoning": rag_result["fallback_reasoning"],
         "retrieval_route": rag_result["retrieval_route"],
         "retrieval": rag_result["retrieval"],
+        "intent": rag_result["intent"],
+        "listed_ticket_ids": rag_result["listed_ticket_ids"],
     }
 
 

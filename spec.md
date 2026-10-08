@@ -1,189 +1,364 @@
-# Roche ATLAS ITSM Co-Pilot — Implementation Specification
+# Roche ATLAS ITSM Co-Pilot — Current Architecture Specification
 
 ## Objective
 
-Deliver a single-repository IT service-management co-pilot with a React/Vite
-frontend and FastAPI backend. It presents mocked ITSM ticket health, ticket
-relationships and notes, and a conversational interface for ticket queries and
-CR/RCA drafting. The frontend is compiled into static assets which FastAPI
-serves from `frontend/dist`.
+Provide an executive-grade ITSM co-pilot for ServiceNow-style operations. The
+application combines a ticket dashboard, service-health analytics, interactive
+ticket inspection, and grounded conversational assistance over a single
+canonical enterprise data model.
 
-The requested deployment target was left unselected. Therefore, for this
-implementation, **delivery** means a successful production build and push to
-`origin/main`. A hosting platform, public URL, credentials, and CI/CD deployment
-configuration are explicitly out of scope and must be supplied before a remote
-runtime deployment can be performed.
+The current delivery is a local, mock-backed reference implementation. It is
+designed to connect to Gemini, ServiceNow, Veeva Vault, HP ALM, and Google
+Drive when approved credentials and production connector adapters are supplied.
+It is not yet a live integration or a production deployment.
 
 ## Requirements
 
-### Frontend build and styling
+### Product capabilities
 
-1. In `frontend`, replace the existing Tailwind v4 dependency with the required
-   Tailwind CSS v3 toolchain by running:
+1. Provide three persistent React views:
+   - **Stats**: executive KPIs, interactive operational charts, team and
+     assignee capacity metrics, and chart-to-ticket drill-down.
+   - **Dashboard**: filtered ServiceNow work queue and a full ticket inspector.
+   - **Chat**: vector-grounded ITSM co-pilot with citations, ticket context,
+     CR generation, and RCA generation.
+2. Support INC, RITM, PRB, and CHG records, with ServiceNow-style fields and
+   type-specific content:
+   - INC/RITM: SLA, requester/customer journals, sentiment, child incidents.
+   - PRB: RCA state, linked incidents, PTasks, and linked changes.
+   - CHG: CAB/change state, originating work, and CTasks.
+3. Use one canonical ticket catalog for every product surface. Dashboard rows,
+   Stats metrics, Chat ticket context, ticket topology, and RAG retrieval must
+   never maintain independent copies of ticket information.
+4. Derive all "Awaiting …" metrics strictly from `state == "On Hold"` and the
+   ServiceNow-style `hold_reason` field. Supported reasons include Awaiting
+   Caller, Change, Child, Vendor, Problem, and Parent.
+5. Make Stats visuals interactive: clicking a KPI, chart segment, trend period,
+   group row, or assignee row opens exactly the matching canonical tickets in
+   Dashboard. Dashboard must offer return-to-Stats navigation.
+6. Detect unusual incident patterns from the selected canonical reporting
+   scope. The detector must compare recent incident volume with the preceding
+   trend and identify explainable assignment-group, category, business-service,
+   and P1/P2 concentration changes. Stats must render the findings as an
+   interactive chart with ticket drill-down.
+7. Show assignment-group anomaly briefings only when the backend reports an
+   actual abnormal pattern. Healthy assignment-group selections must not
+   interrupt the user with an empty modal.
+8. When an assignee is selected, prioritize their queue in this order:
+   breached or at-risk customer work, stale Problems/pending PTasks, Changes
+   with pending CTasks, then regular backlog. Show the assignee briefing only
+   when that person has an actionable risk signal.
+9. Give every canonical ticket a stored, ticket-specific AI executive
+   resolution plan. Plans must be grounded in the record description, current
+   state, journal evidence, linked records/tasks, and enterprise knowledge;
+   they must not apply a generic SAP-module checklist to unrelated records.
 
-   ```bash
-   npm install -D tailwindcss@3 postcss autoprefixer
-   ```
+### Data and integration requirements
 
-2. Ensure `frontend/tailwind.config.js` is an ESM configuration with exactly the
-   requested scan paths:
+1. Maintain a canonical in-memory ServiceNow-style ticket repository with
+   relational IDs rather than embedded competing ticket copies.
+2. Maintain one centralized enterprise knowledge registry covering ServiceNow
+   KBAs, Veeva Vault QMS material, HP ALM defects, and Google Drive KT/SUD
+   documents.
+3. Build vector chunks from both canonical tickets and knowledge records.
+   Every vector chunk must retain `ticket_id`, `ticket_number`,
+   `assignment_group`, and SAP `module` metadata.
+4. Keep connector boundaries read-only by default. Connector status must state
+   whether a source is mock-backed, which environment variables are required,
+   and whether it is integration-ready.
+5. Support Gemini generation and embeddings through environment configuration;
+   local development must continue using deterministic fallback retrieval and
+   grounded response synthesis when no key is configured.
+6. Store `ai_resolution_summary` and source-tagged `ai_resolution_steps` on
+   every canonical ticket. Each step contains an action, why it is relevant,
+   and its evidence provenance (for example ServiceNow journal, linked PRB or
+   CHG, KBA, Veeva SOP, or connector evidence). The existing RAG/chat guide
+   must mirror this canonical resolution summary.
 
-   ```js
-   /** @type {import('tailwindcss').Config} */
-   export default {
-     content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
-     theme: { extend: {} },
-     plugins: [],
-   }
-   ```
+## Constraints
 
-3. `frontend/src/index.css` must begin with the three Tailwind v3 directives:
-   `@tailwind base`, `@tailwind components`, and `@tailwind utilities`.
-   Add `frontend/postcss.config.js` if it is absent so Vite processes those
-   directives with `tailwindcss` and `autoprefixer`.
-
-4. Replace the Vite starter screen with a responsive, accessible two-tab React
-   application: **Dashboard** and **Chat**.
-
-### Backend
-
-1. Create an importable `backend/app` package and provide dependency metadata
-   sufficient to run FastAPI locally (at minimum FastAPI and Uvicorn).
-2. In `backend/app/models.py`, define a typed `Ticket` Pydantic schema,
-   in-memory `MOCK_DB`, and `calculate_health_color()`.
-3. Seed `MOCK_DB` with these IDs and relationship coverage:
-
-   | ID | Type | Relationship role |
-   | --- | --- | --- |
-   | `INC0048102` | Incident | Parent incident |
-   | `INC0048103` | Incident | Child incident |
-   | `PRB0019201` | Problem | Linked problem |
-   | `CHG0092100` | Change | Linked change |
-
-4. Every ticket must include enough mock information to render its ID, title,
-   state, assignee, SLA state, sentiment, work notes, closure notes, related
-   records, and KBA/Veeva/Google Drive reference values.
-5. `calculate_health_color(ticket)` returns one of `RED`, `YELLOW`, or `GREEN`.
-   The deterministic rule is: a breached SLA or `Frustrated` sentiment is RED;
-   an at-risk SLA or `Impatient` sentiment is YELLOW; all other combinations
-   are GREEN. The most severe applicable result wins.
-
-### API contract
-
-`backend/app/main.py` exposes JSON APIs under `/api` and serves the compiled
-single-page app:
-
-| Method and path | Behavior |
-| --- | --- |
-| `GET /api/dashboard/tickets` | Returns ticket summaries, each including the calculated health color. Optional `assignee` filtering may be supported server-side; the client must still work from the unfiltered response. |
-| `GET /api/tickets/{id}` | Returns the complete ticket and normalized relationship data. Return JSON `404` for an unknown ID. |
-| `POST /api/chat/query` | Accepts a JSON query with `message`, optional `ticket_id`, and optional action (`chat`, `generate_cr`, or `generate_rca`). Returns a deterministic mock co-pilot response with any generated CR/RCA content. Validate malformed payloads with FastAPI's normal 422 response. |
-
-Static routing must only occur after API routes are registered. Existing files
-under `frontend/dist` are served directly; non-API paths fall back to
-`frontend/dist/index.html` so browser refreshes work for the SPA. If no build
-exists, API routes must remain usable and root handling must fail clearly rather
-than masking an API error.
-
-### User interface
-
-1. `frontend/src/api.js` contains the central `fetch` helpers for all three API
-   endpoints. Helpers must reject non-success responses with a useful error.
-2. `frontend/src/components/Dashboard.jsx` displays active tickets in a
-   color-coded table. Health indicators use RED/YELLOW/GREEN, and visible
-   sentiment labels include Frustrated, Impatient, and Calm. It provides
-   assignee filtering, loading/empty/error states, and a side drawer that loads
-   and displays selected-ticket details. The drawer can be dismissed by its
-   explicit control and Escape key.
-3. `frontend/src/components/TicketCard.jsx` renders selected-ticket details:
-   an inline chat card, latest work notes, closure notes, resource-copy buttons,
-   and a clear relational topology tree:
-
-   ```text
-   Parent INC -> Child INC(s) -> Linked PRB -> Linked CHG
-   ```
-
-   KBA, Veeva, and GDrive buttons copy their corresponding configured reference
-   to the browser clipboard and give temporary success/error feedback. They must
-   not claim to write to those external systems.
-4. `frontend/src/components/Chat.jsx` is a full-width conversation view with
-   message input, send control, loading/error feedback, and quick actions that
-   invoke CR and RCA generation through `POST /api/chat/query`.
-5. `frontend/src/App.jsx` owns the Dashboard/Chat navigation state and mounts
-   both views without adding a router dependency. The default tab is Dashboard.
-6. Use Tailwind utility classes for application styling. Avoid reliance on
-   generated assets, proprietary service APIs, or unsupported browser-only APIs
-   without graceful error feedback.
+- The repository does not contain real ServiceNow, Veeva, HP ALM, Drive, or
+  Gemini credentials. Secrets must remain outside Git.
+- The local vector backend is Chroma when installed; deterministic in-process
+  hash embeddings are an intentional offline fallback, not a production
+  semantic-embedding replacement.
+- Current external connectors expose production-compatible contracts but read
+  canonical mock data. Live OAuth/token flows, source polling/webhooks,
+  credential rotation, and write operations are out of scope until authorized.
+- The application is static React assets served by FastAPI. It has no current
+  SSO, RBAC, audit persistence, relational database, background job worker,
+  rate limiting, or cloud deployment configuration.
+- Preserve unrelated local/untracked files and do not commit generated vector
+  databases, credentials, or development caches.
+- The anomaly detector and per-ticket resolution plans are deterministic,
+  explainable decision support in the reference implementation. They are not a
+  trained predictive model, autonomous remediation system, or a substitute for
+  approved operational change control.
 
 ## Architecture
 
 ```text
-React/Vite UI
-  ├─ Dashboard ───── GET /api/dashboard/tickets
-  │   └─ TicketCard / drawer ─ GET /api/tickets/{id}
-  └─ Chat / quick actions ──── POST /api/chat/query
-                                  │
-                                  ▼
-                         FastAPI + MOCK_DB
-                                  │
-                                  ▼
-                  frontend/dist static files + SPA fallback
+                                    React + Vite + Tailwind
+                                App.jsx owns persistent tab state
+                                                |
+                                                | /api
+                +-------------------------------+------------------------------+
+                |                               |                              |
+                v                               v                              v
+          Stats.jsx                       Dashboard.jsx                    Chat.jsx
+    KPIs, anomaly chart              Queue, warnings, drawer       Citations and actions
+                |                               |                              |
+                +--------------------- canonical ticket IDs ------------------+
+                                                |
+                                                v
+                                  FastAPI (backend/app/main.py)
+                              APIs, aggregation, chat, SPA static mount
+                                      |                         |
+                                      v                         v
+                    Canonical ticket and knowledge stores     Hybrid RAG
+                         models.py + central_db.py       rag_engine.py + vector_store.py
+                                      |                         |
+                                      v                         v
+                          ServiceNow-style MOCK_DB       Chroma/local vector fallback
+                              and knowledge registry      Gemini embeddings/generation
+                                      |                         |
+                                      +------------ connector contracts --------+
+                                                    connectors.py
+                               ServiceNow | Veeva Vault | HP ALM | Google Drive
 ```
 
-The system is intentionally mock-backed: no ServiceNow, KBA, Veeva, Google
-Drive, LLM provider, database, authentication, or authorization integration is
-introduced. The API shape is deliberately separated from UI components so those
-systems can replace `MOCK_DB` later without restructuring the screen.
+### Frontend
 
-## Constraints and safeguards
+- **`App.jsx`** owns tab state, selected theme, and the Stats-to-Dashboard
+  drill-down payload. Dashboard and Chat remain mounted while hidden so Chat
+  history persists.
+- **`Stats.jsx`** retrieves backend-calculated metrics and renders KPI cards,
+  donut charts, pipelines, team SLA health, workload/capacity tables, and a
+  curved trend chart. It also renders the explainable incident-anomaly chart.
+  It sends matching ticket IDs to App when the user clicks a chart element.
+- **`Dashboard.jsx`** retrieves the canonical queue and assignment-group list,
+  provides multi-select group/assignee filters, and renders a ticket drawer.
+  It invokes the Stats API for assignment-group anomaly checks and shows an
+  anomaly modal only when insights are present. Assignee selection applies the
+  operational urgency ranking and shows an assignee briefing only for an
+  actionable workload. When launched from Stats it applies the supplied
+  canonical ticket IDs and provides a return control.
+- **`TicketCard.jsx`**, **`TopologyTree.jsx`**, and
+  **`WorkItemActivities.jsx`** render ServiceNow journal, topology, task,
+  attachment, SLA, similarity, and knowledge-reference details consistently in
+  Dashboard and Chat. `TicketCard.jsx` renders the source-tagged, scrollable
+  AI Executive Resolution Plan rather than a generic module checklist.
+- **`Chat.jsx`** calls the chat API, shows vector-grounded/fallback state, and
+  renders cited source cards and selected ticket context.
 
-- Plan mode prohibits implementation during this phase; this document is the
-  only intended workspace change.
-- Keep the scope to the requested frontend, backend, build metadata, and this
-  specification. Preserve pre-existing uncommitted files that are unrelated to
-  the feature, including the root-level untracked `tailwind.config.js`, unless
-  the user explicitly authorizes its modification or inclusion.
-- Do not invent a cloud deployment target. Do not expose a public service or
-  make external system writes.
-- The requested `git add .` is superseded by a status review before committing:
-  stage only the completed feature and specification files so unrelated user
-  work is not included. Use the requested commit message for the scoped commit:
-  `feat: complete ATLAS ITSM Co-Pilot codebase`.
-- Push only after build and backend smoke checks pass and the configured remote
-  and current branch are verified. Do not force-push.
+### Backend and canonical data
 
-## Implementation steps
+- **`models.py`** contains the Pydantic `Ticket` schema, journal entry schema,
+  ServiceNow-like state fields, SLA calculations, `hold_reason`, relationship
+  IDs, and the dense SAP enterprise `MOCK_DB` catalog. It also defines
+  `TICKET_RESOLUTION_PLANS`: one source-tagged technical resolution plan for
+  each canonical ticket.
+- **`central_db.py`** owns the canonical ticket repository and canonical
+  multi-source knowledge registry. It returns references to the same ticket
+  objects rather than copying ticket data for separate consumers.
+- **`main.py`** serializes canonical tickets, derives customer sentiment and
+  breach classification, hydrates relationship topology, aggregates Stats, and
+  handles API/static-SPA routing.
+- Dashboard and Stats share a canonical reporting window and the same
+  `is_sla_breached()` rule. This prevents the same record from being counted
+  differently between views.
+- **`main.detect_incident_anomalies(tickets, report_start, report_end)`**
+  compares the recent 30-day period with the preceding reporting window and
+  returns only evidence-backed anomaly insights. Each insight exposes affected
+  ticket IDs, expected versus observed volume, explanation, confidence, and a
+  recommended action.
+- **`main.build_ticket_ai_insight(ticket)`** serializes the canonical stored
+  resolution summary and steps into the ticket API response. Its generic SAP
+  technical logic is a fallback only; all mock tickets use their explicit
+  `ai_resolution_steps`.
 
-1. Inspect repository status and existing Vite configuration; retain relevant
-   starter project setup while removing obsolete starter UI code.
-2. Install the requested Tailwind v3 development dependencies in `frontend`;
-   update the lockfile, Tailwind config, PostCSS config, and global CSS.
-3. Create the backend package, ticket schema, four-ticket mock dataset, health
-   calculation, API routes, static mount, SPA fallback, and local dependency
-   metadata.
-4. Build `api.js`, `TicketCard`, `Dashboard`, `Chat`, and the two-tab `App`,
-   wiring each state transition to the documented API contract.
-5. Run frontend linting when compatible with the existing project and run
-   `npm run build` in `frontend`. Run backend import/API smoke checks using an
-   in-process FastAPI client or equivalent, including 200/404/422 cases and all
-   health color branches.
-6. Build production frontend assets with `npm run build`; verify FastAPI serves
-   an asset and SPA fallback while all `/api` routes continue to return JSON.
-7. Review the diff and Git status; commit only the scoped files with the
-   requested message and push the resulting commit to `origin/main`.
+### Vector RAG and Gemini
+
+1. FastAPI startup runs `initialize_vector_db()`.
+2. `rag_engine.build_retrieval_documents()` creates chunks for connector
+   articles plus each ticket's overview, journal, and task evidence.
+3. `vector_store.LocalVectorStore` fingerprints and synchronizes this corpus to
+   a persistent Chroma collection when Chroma is installed.
+4. `GeminiEmbeddingProvider` uses Gemini embeddings if `GEMINI_API_KEY` is
+   available; otherwise it uses stable local hashed vectors.
+5. Chat performs direct ticket-ID extraction plus vector/lexical retrieval.
+   Retrieved ticket IDs are rehydrated from the canonical repository immediately
+   before response generation, preventing stale RAG status or journal content.
+6. Gemini is invoked only when configured. Otherwise, a deterministic grounded
+   answer or explicit ITIL diagnostic fallback is returned. Sources are always
+   returned as structured citation objects.
+7. The ticket overview retrieval chunk includes the same canonical resolution
+   summary used by the drawer. Retrieval therefore cannot cite an out-of-date
+   generic resolution guide for a ticket whose drawer shows a different plan.
+
+### External connector readiness
+
+`backend/.env.example` defines the required placeholders:
+
+| System | Required configuration |
+| --- | --- |
+| Gemini | `GEMINI_API_KEY`, optional generation/embedding model names |
+| ServiceNow | instance URL, OAuth client ID, OAuth client secret |
+| Veeva Vault | Vault URL, OAuth client ID, OAuth client secret |
+| HP ALM | base URL, OAuth client ID, OAuth client secret |
+| Google Drive | folder ID, service-account credentials path |
+
+`GET /api/rag/status` exposes vector backend mode, embedding mode, Gemini
+configuration state, and per-connector missing environment variables without
+exposing secret values.
+
+## API surface
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/dashboard/tickets` | Canonical ticket queue, optionally filtered by assignee/group |
+| `GET /api/dashboard/assignment-groups` | Enterprise assignment-group catalog |
+| `GET /api/dashboard/stats` and `GET /api/stats` | Live canonical analytics with group, assignee, and date filters |
+| `GET /api/tickets/{id}` | Full ticket hydrated by number, ID, or `sys_id` |
+| `POST /api/chat/query` and `POST /api/chat` | RAG-backed chat and CR/RCA actions |
+| `GET /api/knowledge/sources` | Centralized knowledge-source registry |
+| `GET /api/rag/status` | RAG/vector/Gemini/connector readiness diagnostics |
+
+## Implemented feature inventory
+
+### ServiceNow work management
+
+- Native-style INC, RITM, PRB, and CHG schemas with number, `sys_id`, state,
+  priority, assignment group, assignee, requester, SLA fields, hold reason,
+  journals, closure rules, attachments, and SAP module/service classification.
+- Relational topology with parent/child incidents, linked Problems and Changes,
+  originating tickets, CTasks, PTasks, and SCTasks. Child views hydrate their
+  full canonical record rather than displaying copied comment fixtures.
+- Human-only customer/support journal rendering, customer sentiment scoring,
+  reverse-chronological streams, pinned evidence, similarity/duplicate
+  warnings, historical-context cards, and type-appropriate task activity.
+- Warning-only assignee triage, breach reasons, SLA overdue display, and
+  operational urgency ordering.
+
+### Executive operations analytics
+
+- Group/date filtered KPIs, SLA health, work-state and dependency distributions,
+  record-type pipeline, team workload, team SLA ownership, capacity matrix,
+  team-status call summary, and curved multi-group trend chart.
+- Cursor-following chart tooltips and drill-down from visual metrics into the
+  exact canonical Dashboard queue.
+- Explainable anomaly detection for unusual incident patterns. Insights include
+  observed versus expected count, confidence, evidence, correlated tickets,
+  and a recommended intervention; modals open only when an anomaly exists.
+
+### AI and RAG
+
+- Persistent local Chroma vector store when available, with deterministic local
+  vector fallback for offline development.
+- Gemini embedding and generation adapters, activated only when
+  `GEMINI_API_KEY` is supplied; deterministic grounded answer and ITIL fallback
+  behavior otherwise.
+- Hybrid ticket-ID, lexical, and semantic retrieval across ServiceNow-style
+  tickets/journals/tasks plus ServiceNow KBA, Veeva Vault, HP ALM, and Google
+  Drive source records.
+- Structured source citations, source-specific citation cards, conversational
+  ticket context, active-ticket listing by SAP domain, CR/RCA actions, and
+  per-ticket source-tagged technical resolution plans.
+
+### Experience and presentation
+
+- Persistent Stats, Dashboard, and Chat tabs; Chat remains mounted while
+  hidden, preserving chat history.
+- Light and dark themes, responsive layout, executive dashboard presentation,
+  interactive inspector drawer, and consistent topology/task rendering across
+  Dashboard and Chat.
+
+## AI capability assessment
+
+ATLAS is accurately described as an **AI-enabled ITSM co-pilot prototype**,
+not yet as a fully production-grade autonomous AI platform.
+
+- It has real AI/RAG integration points: Gemini generation and embeddings,
+  vector retrieval, grounding, citation objects, and contextual response
+  synthesis are implemented in the codebase.
+- Without a configured Gemini key, this environment uses deterministic local
+  hash embeddings and rule/knowledge-grounded response logic. That remains
+  useful decision support, but it is not live generative-model inference.
+- The anomaly detector and stored executive resolution plans are explainable
+  data-driven/rule-based intelligence. They are deliberately deterministic so
+  leaders can inspect their evidence. They are not model-trained forecasting
+  or autonomous incident remediation.
+- The connector interfaces and environment placeholders are ready for
+  integration, but current source data is canonical mock data. No live
+  ServiceNow, Veeva, HP ALM, Drive, SSO, RBAC, write-back, or production
+  governance is active.
+
+In short: the product has the architecture and interaction pattern of a modern
+AI co-pilot, plus a functional local vector RAG path. It becomes a genuine
+enterprise generative-AI system only after Gemini is configured and approved
+live connector, identity, data-governance, and production-operational controls
+are implemented.
+
+## Key runtime contracts
+
+| Component / function | Inputs | Output / responsibility |
+| --- | --- | --- |
+| `ticket_payload(ticket)` | Canonical `Ticket` | API-safe ticket plus SLA, sentiment, breach, topology, and AI resolution insight fields. |
+| `get_dashboard_stats(groups, filter_active, assignees, start, end)` | Canonical filter criteria | All KPIs, chart datasets, ticket drill-down index, and anomaly detection results. |
+| `detect_incident_anomalies(tickets, start, end)` | Filtered canonical tickets and reporting window | Evidence-backed abnormal incident trends with exact impacted ticket IDs. |
+| `build_ticket_ai_insight(ticket)` | Canonical ticket | Stored summary and source-tagged resolution steps; generic fallback only if a plan is absent. |
+| `build_retrieval_documents()` | Canonical ticket/knowledge stores | Metadata-preserving vector chunks for knowledge, overview, journals, and tasks. |
+| `retrieve_vector_context(query, limit)` | User question and result limit | Hybrid exact-ticket, lexical, and semantic retrieval candidates with citations. |
+
+Example operational flow: selecting **SAP PLM Support** in Dashboard calls
+`GET /api/dashboard/stats` with that group, receives any anomaly insights, and
+opens the anomaly warning only when `insights.length > 0`. Opening a PLM ticket
+then uses `GET /api/tickets/{number}`; its drawer resolution plan comes from
+the same canonical `Ticket.ai_resolution_steps` that feeds the RAG overview.
+
+## Implementation steps for the next production phase
+
+1. Replace canonical mock connector implementations with approved, read-only
+   ServiceNow, Veeva Vault, HP ALM, and Drive adapters using the documented
+   environment configuration.
+2. Move all secrets to the approved secret manager and inject them at runtime;
+   never load production credentials from committed `.env` files.
+3. Replace local Chroma persistence with an approved managed vector store, or
+   provision a persistent Chroma volume with encryption, backup, access
+   controls, and index lifecycle management.
+4. Replace `MOCK_DB` with a persistent system-of-record integration or database
+   layer and add sync/refresh, retry, audit, and conflict-handling behavior.
+5. Add application authentication, RBAC, tenancy/data-boundary enforcement,
+   observability, request rate limits, tests, CI/CD, security review, and an
+   approved deployment target.
+6. Validate Gemini model choice, regional data controls, retention policy,
+   prompt logging policy, and connector access with the relevant platform and
+   security owners.
 
 ## Success criteria
 
-- `frontend/package.json` and lockfile resolve Tailwind 3.x, PostCSS, and
-  Autoprefixer; `npm run build` exits successfully and creates `frontend/dist`.
-- The finished application has working Dashboard and Chat tabs, assignee
-  filters, color-coded health, a usable keyboard-dismissible details drawer,
-  topology tree, notes, clipboard feedback, and CR/RCA quick actions.
-- `/api/dashboard/tickets` returns all four required records with correct
-  colors; ticket detail returns a full record; unknown IDs return 404; chat,
-  CR, and RCA requests return deterministic mock responses.
-- Direct access to a compiled static asset and a non-API SPA path succeeds when
-  `frontend/dist` exists, without intercepting `/api/*` routes.
-- The requested commit exists on `main` and `git push origin main` succeeds.
-- A remote deployment is not represented as complete unless a hosting target
-  and deployment configuration are later provided.
+### Current reference implementation
+
+- Dashboard, Stats, and Chat retrieve the same canonical ticket state.
+- All Stats KPIs and chart drill-downs map to exact canonical ticket IDs.
+- On-hold dependency metrics are calculated only from valid On Hold records and
+  `hold_reason`.
+- RAG retrieves and cites ticket plus knowledge evidence with metadata back to
+  its canonical ticket, assignment group, and module.
+- Every canonical ticket has a source-tagged technical resolution plan and the
+  drawer displays that plan without substituting unrelated module-wide steps.
+- Anomaly and assignee pop-ups appear only for actionable backend-derived risk
+  signals; a healthy filtered scope never produces an empty warning modal.
+- The app starts and operates without external credentials, while honestly
+  reporting fallback mode and connector readiness.
+- `npm run lint`, `npm run build`, backend API smoke tests, and
+  `GET /api/rag/status` pass.
+
+### Production readiness gate
+
+- Approved live connector implementations and secrets are configured.
+- A persistent, access-controlled ticket and vector data store is deployed.
+- Authentication, RBAC, audit, monitoring, backup, resiliency, test coverage,
+  and CI/CD controls are approved.
+- Gemini and all external integrations are validated under the enterprise's
+  security, compliance, and data-governance requirements.

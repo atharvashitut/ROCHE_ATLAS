@@ -21,9 +21,10 @@ export async function fetchAssignmentGroups() {
   return request('/dashboard/assignment-groups')
 }
 
-export async function fetchDashboardStats({ assignmentGroups = [], groupFilterActive = false, startDate, endDate } = {}) {
+export async function fetchDashboardStats({ assignmentGroups = [], assignees = [], groupFilterActive = false, startDate, endDate } = {}) {
   const params = new URLSearchParams()
   assignmentGroups.forEach((group) => params.append('assignment_group', group))
+  assignees.forEach((assignee) => params.append('assignee', assignee))
   if (groupFilterActive) params.set('group_filter_active', 'true')
   if (startDate) params.set('start_date', startDate)
   if (endDate) params.set('end_date', endDate)
