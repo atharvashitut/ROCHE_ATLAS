@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - optional until requirements are instal
 
 from .central_db import central_ticket_records
 from .connectors import connector_documents, connector_statuses
+from .local_llm import LOCAL_OPEN_SOURCE_GENERATOR
 from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, serialize_retrieved
 
 
@@ -200,7 +201,7 @@ def _grounded_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
         "For an analysis or resolution request, organise the answer as Situation, Key risks or blockers, and Recommended actions with numbered steps. "
         "Call out approval, GxP, rollback, or escalation gates when the evidence requires them. "
         "For a specific ticket, explain in plain English what is happening, why it matters, what is currently blocking progress, and the best next move. "
-        "Do not recite raw labels, every field, or JSON-style key/value data. Use short headings and numbered action items. Never use hyphen characters as list markers or separators. Use citations inline as [id], and mention that the linked source cards contain the documents. "
+        "Do not recite raw labels, every field, or JSON-style key/value data. Use short headings and numbered action items. Never use hyphen characters as list markers or separators. When a source is relevant, mention its title naturally in the sentence rather than outputting source IDs, URLs, or UI instructions. "
         "Do not invent source details.\n\n"
         f"Question: {query_text}\n\nLive ServiceNow ticket state from MOCK_DB:\n{live_context}\n\nEnterprise evidence:\n{excerpts}"
     )
@@ -298,6 +299,15 @@ def _topic_action_items(query_text: str) -> list[str] | None:
     """Return concise local guidance for the high-value SAP support domains."""
 
     query = query_text.casefold()
+    if any(term in query for term in ("hp alm", "quality center", "test plan", "test set", "test run", "test lab", "req coverage", "requirement coverage")):
+        return [
+            "Confirm the correct domain first: FIXE for LAL, FPSEWD for BAU10, or MMMCLC for LAURA, then select the right testing folder.",
+            "Create and name the test plan using the applicable convention; BAU10 unit testing is restricted to authorization changes, while SAT plans use the Change number and description.",
+            "Assign the required Designer, L2 IT assessor, Validation, and any LAL Quality or LAURA business-assessor roles before linking applicable URS, FS, and TDS requirements.",
+            "Define each design step with distinct expected and actual results, set Evidence Required to Y, and collect screenshots at the location required by the landscape.",
+            "Move the plan and run through the controlled review and approval states; create a test set early if needed, but do not create a test run until the test plan is approved.",
+            "After approval, update the related Change Request and close its testing task with the completed evidence and approvals.",
+        ]
     if "plm" in query or any(term in query for term in ("recipe", "classification", "design bom")):
         return [
             "Confirm the affected recipe, specification, design BOM, material, approval step, and business release impact.",
@@ -417,8 +427,22 @@ def _sources(chunks: list[dict[str, object]]) -> list[dict[str, object]]:
     return sources
 
 
+def _add_natural_source_attribution(answer: str, chunks: list[dict[str, object]]) -> str:
+    """Keep source lineage visible in prose without adding UI cards or raw IDs."""
+
+    for chunk in chunks:
+        if chunk.get("record_type") != "knowledge":
+            continue
+        title = str(chunk.get("title", "")).strip()
+        system = str(chunk.get("system", "enterprise knowledge base")).strip()
+        if title and title.casefold() not in answer.casefold():
+            return f"{answer.rstrip()}\n\nThis guidance is grounded in {system}'s {title}."
+        break
+    return answer
+
+
 def query_hybrid_rag(query_text: str) -> dict[str, Any]:
-    """Retrieve vector evidence, then synthesize a Gemini-grounded response."""
+    """Retrieve evidence, then prefer Gemini or local open-source synthesis."""
 
     chunks = retrieve_vector_context(query_text)
     has_internal_match = bool(chunks)
@@ -437,6 +461,13 @@ def query_hybrid_rag(query_text: str) -> dict[str, Any]:
                 answer, model_used = generated.text, GENERATION_MODEL
         except Exception:
             pass
+    elif not ticket_list_intent:
+        local_answer = LOCAL_OPEN_SOURCE_GENERATOR.generate(prompt)
+        if local_answer:
+            answer = local_answer
+            model_used = f"local:{LOCAL_OPEN_SOURCE_GENERATOR.model_id}"
+    if has_internal_match and not ticket_list_intent:
+        answer = _add_natural_source_attribution(answer, chunks)
     ticket_ids = []
     for chunk in chunks:
         ticket_id = str(chunk.get("ticket_id") or chunk.get("ticket_number") or "").upper()
@@ -468,6 +499,7 @@ def rag_status() -> dict[str, object]:
             "model": GENERATION_MODEL,
             "fallback": "local-grounded-fallback",
         },
+        "local_generation": LOCAL_OPEN_SOURCE_GENERATOR.status(),
     }
 
 

@@ -362,3 +362,683 @@ the same canonical `Ticket.ai_resolution_steps` that feeds the RAG overview.
   and CI/CD controls are approved.
 - Gemini and all external integrations are validated under the enterprise's
   security, compliance, and data-governance requirements.
+
+## Business architecture and commercial product narrative
+
+### Product definition
+
+**Roche ATLAS ITSM Co-Pilot** is an AI-enabled ITSM operations cockpit for
+enterprise support leaders, assignment-group leads, and L2/L3 engineers. It
+combines ServiceNow-style work management, explainable operational analytics,
+ticket-level investigation, and grounded knowledge retrieval in one workspace.
+
+The current application is a polished, locally runnable **reference PoC**. It
+is credible for demonstrations, solution design, pilot discovery, and
+integration planning. It is not yet a production SaaS product because the
+canonical records are mock data and live connectors, identity, governance, and
+operational controls have not been deployed.
+
+### Business problem addressed
+
+Enterprise support teams commonly need to move between ServiceNow queues,
+spreadsheets, knowledge portals, problem/change records, monitoring alerts,
+and engineer conversations before they can answer four basic questions:
+
+1. What needs attention now?
+2. Which team or engineer is carrying risk?
+3. Are apparently separate tickets part of one underlying issue?
+4. What is the safest, evidence-backed next resolution action?
+
+ATLAS turns those questions into a common operational workflow. It does not
+replace ServiceNow as the system of record. It acts as a read-only intelligence
+and decision-support layer over ITSM records and connected enterprise knowledge.
+
+### Personas and outcomes
+
+| Persona | Primary need | ATLAS outcome |
+| --- | --- | --- |
+| Executive / service owner | Rapid visibility of operational risk | KPI ribbon, SLA health, workload, anomalies, trends, and ticket drill-down. |
+| Tower or assignment-group lead | Manage a multi-team queue and intervene early | Group filters, anomaly findings, team call summary, breach distribution, and linked record context. |
+| L2/L3 engineer | Diagnose and resolve the correct issue quickly | Ticket briefing, human journal, topology, tasks, historical similarity, knowledge citations, and ticket-specific resolution steps. |
+| Incident manager | Coordinate escalation and identify recurring causes | Related incidents, linked Problems/Changes, duplicate signals, breach reasons, and suggested advisory actions. |
+| Knowledge / quality owner | Make approved operating procedures discoverable | Grounded RAG citations across ServiceNow, Veeva Vault, HP ALM, and Google Drive knowledge. |
+
+### Commercial capability map
+
+| Capability domain | Current PoC capability | Customer value | Production expansion |
+| --- | --- | --- | --- |
+| ITSM operational cockpit | Dashboard, Stats, and Chat tabs backed by one canonical catalog | One view of operational health and work queues | Live ServiceNow read model, tenant separation, real-time refresh. |
+| Executive analytics | KPIs, distributions, group workload, assignee capacity, trend charts, chart-to-ticket drill-down | Faster service reviews and accountable action | Historical warehouse, configurable reporting periods, export/scheduling. |
+| AI operations analyst | Deterministic anomaly, group, assignee, and ticket analyses | Explainable risk and prioritisation without black-box claims | Governed model-assisted reasoning and validated predictive signals. |
+| Ticket investigation | Drawers with SLA, sentiment, journal, topology, tasks, attachments, similarities, and resolution plans | Less context switching and faster triage | Live journal/task relationships, update timestamps, CI/service graph. |
+| Knowledge intelligence | Hybrid RAG with vector and lexical retrieval plus citations | Grounded answers instead of untraceable chatbot text | Approved embeddings/LLM, source ingestion, permissions-aware retrieval. |
+| Enterprise integrations | Connector contracts and environment placeholders | Clear path to ServiceNow, Veeva, HP ALM, Drive, and Gemini | OAuth/service accounts, secret manager, sync scheduler, observability. |
+
+## Detailed logical architecture
+
+### Architectural principles
+
+1. **One canonical ticket catalog.** All application views derive ticket state
+   from `MOCK_DB` through the central repository abstraction. The Dashboard,
+   Stats service, API details, and RAG chunks do not maintain separate ticket
+   copies.
+2. **Read-only intelligence.** Analytics, retrieval, and AI agent functions
+   observe records and make recommendations; they do not create, update, close,
+   reassign, or write back ServiceNow records.
+3. **Evidence before recommendation.** AI outputs include concrete ticket IDs,
+   source references, state/SLA/task signals, and a confidence level where a
+   meaningful pattern exists. The system is designed to return no finding rather
+   than invent a correlation.
+4. **Graceful offline operation.** The local PoC uses deterministic analysis
+   and retrieval when external model credentials are not present. Gemini is an
+   optional enhancement, not a dependency for core application availability.
+5. **Separation of concerns.** The presentation layer is React, orchestration
+   is FastAPI, business objects are canonical models, retrieval is isolated in
+   the vector/RAG modules, and integrations are expressed as future connector
+   boundaries.
+
+### Layered component model
+
+```text
+┌───────────────────────────────────────────────────────────────────────────┐
+│ Experience layer: React + Vite + Tailwind                                 │
+│                                                                           │
+│  Stats ─ executive analytics, filters, charts, drill-down                │
+│  Dashboard ─ queue, group/assignee controls, drawer, warnings            │
+│  Chat ─ conversational investigation, citations, ticket cards            │
+└───────────────────────────────┬───────────────────────────────────────────┘
+                                │ HTTPS / JSON
+┌───────────────────────────────▼───────────────────────────────────────────┐
+│ API and orchestration layer: FastAPI (`backend/app/main.py`)              │
+│                                                                           │
+│  dashboard listing │ ticket hydration │ stats aggregation │ chat routing  │
+│  filter parsing    │ SLA/sentiment     │ anomaly delivery   │ static SPA   │
+└───────┬─────────────────────┬─────────────────────┬────────────────────────┘
+        │                     │                     │
+┌───────▼─────────────┐ ┌─────▼────────────────┐ ┌─▼────────────────────────┐
+│ Canonical data      │ │ Intelligence layer   │ │ Retrieval / RAG layer     │
+│ `models.py`         │ │ `agent_intelligence` │ │ `rag_engine.py`           │
+│ `central_db.py`     │ │ existing anomaly     │ │ `vector_store.py`         │
+│                     │ │ detector + agents    │ │ hybrid vector + keyword   │
+│ Tickets, topology,  │ │                      │ │ retrieval, citations      │
+│ journals, tasks,    │ │ Group/assignee/      │ │                           │
+│ knowledge refs,     │ │ ticket investigation │ │ Chroma or hash fallback   │
+│ plans and metadata  │ │ (runtime only)       │ │                           │
+└───────┬─────────────┘ └────────────────────────┘ └───────────┬─────────────┘
+        │                                                       │
+┌───────▼───────────────────────────────────────────────────────▼─────────────┐
+│ Integration boundary (contract-ready; mock-backed in this PoC)              │
+│ ServiceNow ITSM │ Veeva Vault QMS │ HP ALM / Quality Center │ Google Drive  │
+│ Gemini / approved generative model                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Canonical data model and lineage
+
+The current canonical repository represents ServiceNow-native work records and
+their operational context. The data model deliberately uses identifiers and
+relationships that map to future live ServiceNow responses.
+
+| Data class | Examples of core fields | Used by |
+| --- | --- | --- |
+| Ticket identity | `sys_id`, `number`, `type`, `short_description`, `description`, `state`, `priority` | Every API, UI view, vector metadata, and agent. |
+| Accountability | `assignment_group`, `assigned_to` / assignee, caller/requested-for context | Dashboard filtering, group/assignee workload, sentiment analysis. |
+| SLA / operational state | `sla_status`, `sla_remaining_minutes`, `is_breached`, `hold_reason`, risk indicators | KPI aggregation, urgency sorting, breach classifier, executive views. |
+| Human journals | ServiceNow-style comment objects with author, timestamp, message, customer flag/role | Drawer journal, customer sentiment, Chat context, evidence. |
+| Relationships | `parent_id`, `child_ids`, linked Problem/Change, originating records | Topology tree, full-record hydration, correlation analysis. |
+| Work tasks | `ctasks`, `ptasks`, `sctasks`, state and latest comment/closure data | Change/Problem execution tracking and AI recommendations. |
+| Business context | SAP module tags, service, CI, category, assignment group | Group analytics, RAG metadata, anomaly/correlation reasoning. |
+| Knowledge & resolution | `knowledge_refs`, historical/similar records, source-tagged resolution plans | Ticket summary, cited chat responses, recommended next actions. |
+
+The parent-child display is dynamically resolved from canonical IDs rather than
+from independently edited embedded copies. That principle prevents the earlier
+class of inconsistency where a child ticket displayed one journal in a parent
+drawer and a different journal when opened independently.
+
+### Data lifecycle in the current PoC
+
+1. `models.py` defines canonical tickets, cross-record relationships, knowledge
+   metadata, and resolution-plan source material.
+2. `central_db.py` exposes that catalog to all backend consumers.
+3. `main.py` calculates filtered dashboard and stats views directly from the
+   canonical source at request time.
+4. `vector_store.py` creates searchable chunks from canonical tickets and the
+   enterprise knowledge corpus; each chunk retains ticket/group/module
+   metadata.
+5. `rag_engine.py` retrieves relevant chunks and asks a configured model to
+   synthesise an answer, or returns a deterministic grounded response locally.
+6. `agent_intelligence.py` reads the same ticket set, existing anomaly signals,
+   relationships, and retrieval evidence to form runtime-only findings.
+7. The frontend displays the resulting state in existing UI components. It does
+   not manufacture an independent analytics dataset.
+
+## Functional feature inventory
+
+### 1. Dashboard and work-queue management
+
+- ServiceNow-style multi-record queue covering INC, RITM, PRB, and CHG records.
+- Ticket-type tabs with context-aware fields: SLA and sentiment for customer
+  work, versus Problem/Change phase and task status for operational records.
+- Searchable assignment-group multi-select with Select All, Deselect All, and
+  My Teams behaviour.
+- Multi-select assignee filter with Select All and Deselect All behaviour.
+- Filtered queue ordering that promotes breached/near-breach, high-sentiment,
+  stale Problems, and Changes with open CTasks ahead of regular backlog.
+- Accurate on-hold dependency categories based on ServiceNow-style
+  `hold_reason`: Awaiting Caller, Child, Change, Problem, Parent, and Vendor.
+- SLA badge treatment for overdue tickets with negative remaining minutes,
+  breach reason classification, and visible urgency.
+- Ticket attachments pinned above journal content when available.
+
+### 2. Ticket drawer and investigation workspace
+
+- A consistent drawer hierarchy for every ticket, with a concise AI executive
+  resolution plan, relational topology, evidence/attachments, human journal,
+  child ticket context where appropriate, and knowledge grounding.
+- Record-type-specific topology:
+  - Incident: parent/current/child incidents plus linked Problem and Change.
+  - Problem: originating incidents, PTasks, and linked fix Change.
+  - Change: originating tickets and CTasks only.
+- Deep-node navigation: clicking a topology item hydrates the full canonical
+  record through the ticket API rather than rendering a shallow cached object.
+- Child ticket journals are pulled from the actual child ticket record, filtered
+  to human messages, and constrained by an internal scroll container.
+- Human customer/support journal with newest-first ordering, author/role,
+  timestamp, and customer sentiment where relevant.
+- Similarity/duplicate and historical-context panels when canonical evidence
+  identifies a related active or resolved record.
+- Change/Problem task cards that show the correct task state and only disclose
+  closure notes for closed tasks.
+
+### 3. Stats and executive cockpit
+
+- KPI ribbon for total scoped records, SLA breaches, in-progress, on-hold, and
+  ServiceNow hold-reason dependencies.
+- Interactive distributions for record type, SLA health, workload, status,
+  module, and assignment group.
+- Four-month incident trend per selected assignment group, using backend data.
+- SLA breach/at-risk breakdown by assignment group for tower-lead
+  accountability.
+- Assignee workload/capacity matrix including active tickets and individual
+  breach count.
+- Team status call summary exposing backlog age, resolution velocity, and breach
+  rate by group.
+- Hover tooltips and chart-to-ticket drill-down so a business metric remains
+  traceable to the underlying records.
+- A Stats-to-Dashboard path with a back action, rather than a dead-end chart.
+
+### 4. Anomaly and workload intelligence
+
+- Existing deterministic anomaly detection evaluates filtered incident volume,
+  priority concentration, service/category concentration, and abnormal trends.
+- Assignment-group analysis enriches actual anomaly results with repeated
+  services, duplicate/similarity signals, related Problems/Changes, evidence,
+  confidence, and advisory action.
+- Assignment-group warning content appears only when the backend finds a
+  material signal; a healthy scope does not show a generic warning dialog.
+- Assignee analysis ranks operational workload by breach, near breach, customer
+  urgency, priority, stale Problems, pending tasks, and related patterns.
+- Assignee briefing appears only when the selected person has an actionable risk
+  signal. It never takes automatic remediation action.
+
+### 5. Conversational co-pilot and grounded retrieval
+
+- Natural-language ticket-ID detection, ticket title/description matching, and
+  SAP-domain query matching for EWM, MM, PLM, Basis, Security, SD, FICO, and
+  related areas.
+- Queries such as “show ongoing PLM tickets”, “what is the status of
+  INC0048102”, or “how do I investigate an EWM queue lock?” can return matched
+  tickets, readable action-oriented content, and relevant citations.
+- Hybrid retrieval combines exact ticket matching, keyword/lexical ranking, and
+  local vector similarity to reduce dependence on one retrieval method.
+- Citations identify the source platform and offer links for ServiceNow KBA,
+  Veeva Vault, HP ALM, Google Drive, and model-grounded responses where
+  applicable.
+- When a model credential is absent, deterministic grounded synthesis still
+  uses the retrieved knowledge/ticket context and does not prevent local use.
+
+### 6. AI agent intelligence layer
+
+The latest intelligence layer is deliberately small, isolated, advisory, and
+reversible. It does not alter the canonical repository.
+
+| Runtime agent | Trigger | Reused inputs | Output | UI destination |
+| --- | --- | --- | --- | --- |
+| Assignment-group investigator | A filtered group produces an existing warning condition | Filtered tickets, existing anomaly results, topology, similarity signals | Meaningful findings with evidence, related IDs, confidence, and recommendation | Existing assignment-group briefing/popup. |
+| Assignee workload investigator | One assignee has an operational warning condition | Assigned tickets, SLA, sentiment, priority, task and Problem state | Prioritised risk summary, affected tickets/patterns, recommended focus | Existing assignee briefing modal. |
+| Ticket investigator | Full ticket is opened or returned from Chat | Canonical ticket, relationships, stored resolution plan, retrieval evidence | What is happening, impact, evidence, related records, likely factor, next steps, confidence | Existing AI Summary / Executive Resolution Plan in drawer and ticket cards. |
+
+Each agent is wrapped in error isolation. If its logic or retrieval fails, the
+regular Stats, Dashboard, Chat, ticket hydration, anomaly detector, and RAG
+paths continue to work and the agent field returns empty/null.
+
+## Runtime sequence flows
+
+### Executive filtering and drill-down
+
+```text
+User selects groups/date/assignees
+  → React sends filter parameters to FastAPI
+  → FastAPI filters canonical tickets once
+  → stats aggregation calculates KPIs, charts, workload, and anomalies
+  → optional group/assignee agent reads the same filtered records
+  → UI renders metric + hover tooltip + exact ticket drill-down
+  → user opens a drill-down ticket
+  → ticket API hydrates canonical record and runtime ticket analysis
+```
+
+### Assignment-group anomaly flow
+
+```text
+Group selected
+  → existing anomaly detector searches for material abnormal patterns
+  → no material evidence: no warning popup
+  → material evidence: group investigator correlates services, duplicates,
+    related Changes/Problems, and record IDs
+  → existing popup presents finding, evidence, confidence, and recommendation
+```
+
+### Assignee prioritisation flow
+
+```text
+Assignee selected
+  → queue ordering ranks breach/near breach + customer urgency first
+  → stale Problems and Changes with pending tasks follow
+  → if actual operational risk exists, existing briefing receives agent summary
+  → user closes briefing and sees the same prioritised queue underneath
+```
+
+### Ticket and Chat investigation flow
+
+```text
+Ticket opened or question submitted
+  → API resolves ticket number/sys_id against canonical repository
+  → RAG retrieves ticket, journal, task, and knowledge chunks with metadata
+  → ticket agent joins canonical relationships and retrieved evidence
+  → response displays action-oriented explanation plus source citations
+  → no model key: deterministic grounded response; model key: Gemini synthesis
+```
+
+## API and function reference
+
+### HTTP API
+
+| Endpoint | Primary parameters | Main response content | Typical usage |
+| --- | --- | --- | --- |
+| `GET /api/dashboard/tickets` | assignment-group, assignee, type/search filters as supported | Filtered canonical ticket summaries | Populate the Dashboard table and quick filtering. |
+| `GET /api/tickets/{ticket_id}` | `ticket_id` may be ServiceNow number or `sys_id`, case-insensitive | Fully hydrated canonical ticket, relationships, SLA/sentiment, resolution data, and isolated `agent_analysis` | Open a drawer or topology node. |
+| `GET /api/dashboard/stats` | selected groups, assignees, start/end dates, active filters | KPI totals, chart series, drill-down IDs, existing anomalies, optional group/assignee analysis | Render Stats and existing operational popups. |
+| `GET /api/dashboard/assignment-groups` | none | Master group list | Populate group selectors. |
+| `POST /api/chat` (and compatibility chat route where present) | user message/query | Answer, matched ticket context, source citations, model/fallback metadata | Answer conversational investigations. |
+| `GET /api/rag/status` | none | Vector-store, source, and model availability state | Health check / demonstration readiness. |
+
+### Important backend functions
+
+| Function | Inputs | Returns | Notes |
+| --- | --- | --- | --- |
+| `ticket_payload(ticket, include_agent_analysis=False)` | Canonical ticket and analysis flag | API-safe ticket payload | Full analysis is opt-in for details; agent failure must not fail hydration. |
+| `get_dashboard_stats(groups, filter_active, assignees, start, end)` | Normalised filter criteria | Unified executive metrics/data series | Applies filters before every calculation to keep Dashboard and Stats aligned. |
+| `detect_incident_anomalies(tickets, start, end)` | Filtered tickets and reporting period | Evidence-backed abnormal incident findings | Existing detector; it is not replaced by the new agent layer. |
+| `analyze_assignment_group_workload(tickets, anomaly_insights)` | Canonical filtered records plus existing detector output | Meaningful group findings only | Read-only enrichment of detector evidence. |
+| `analyze_assignee_workload(tickets, assignee, report_end)` | Filtered scope, selected assignee, date | Risk-focused prioritisation | Uses breaches, near breaches, tasks, stale Problems, similarities, and common services. |
+| `analyze_ticket(ticket, related_records, retrieval)` | Canonical ticket, relationships, retrieval snippets | Ticket-specific explanation and recommendations | Uses evidence rather than a generic module checklist. |
+| `build_retrieval_documents()` | Canonical ticket and knowledge repositories | Vector-indexable chunks with metadata | Preserves `ticket_id`, group, module, source, and URL/path lineage. |
+| `retrieve_vector_context(query, limit)` | Query text and result limit | Ranked hybrid evidence and citations | Supports deterministic local retrieval when an external embedding/model is unavailable. |
+
+### Example customer demonstration prompts
+
+| Prompt | Expected ATLAS behaviour |
+| --- | --- |
+| “What is happening with INC0048102?” | Hydrate the ticket, explain plain-English impact, show current journal/topology, evidence, next actions, and citations. |
+| “Show ongoing Basis tickets.” | Find active Basis-tagged records, return a readable list and relevant grouped context. |
+| “How do I fix an EWM qRFC queue lock?” | Retrieve EWM procedures and provide stepwise guidance with KBA/SOP citations. |
+| “Which SAP PLM tickets are at risk?” | Retrieve or filter PLM records with SLA/priority/sentiment context; do not invent risk where data is absent. |
+| “What should Nina Keller work on first?” | Use assignee workload rules to rank actual risk and explain the rationale. |
+
+## Explainability, guardrails, and trust model
+
+### What every AI-derived finding should expose
+
+- **Finding:** the operational pattern or ticket assessment.
+- **Evidence:** the exact operational signals used, such as SLA state, journal
+  urgency, age, task state, volume trend, or repeated service/category.
+- **Traceability:** related ticket, Change, and Problem IDs plus cited knowledge
+  sources where they exist.
+- **Confidence:** a bounded evidence-based confidence, not a claim of certainty.
+- **Recommended action:** advisory next step only; never an automatic update.
+
+### Explicit non-goals and safeguards
+
+- No agent writes to ServiceNow, Veeva, HP ALM, Google Drive, or `MOCK_DB`.
+- No incident is automatically escalated, reassigned, linked, closed, or used to
+  create a Change/Problem.
+- A similarity indicator is decision support, not a declaration that records
+  are duplicates.
+- A RAG answer is grounded in retrieved content but should be reviewed by a
+  qualified engineer before production action.
+- A local deterministic fallback is designed for continuity and demos; it is
+  not a substitute for an approved enterprise model, eval framework, or human
+  operating procedure.
+
+## Security, compliance, and enterprise readiness
+
+### Current PoC posture
+
+The PoC runs locally with mock enterprise content and optional environment
+variables. It contains no required real API keys, no live source integration,
+no customer production data, and no write-back action. This makes it suitable
+for safe architecture reviews and controlled demos when mock content remains
+in use.
+
+### Required controls before customer production use
+
+| Area | Required production control |
+| --- | --- |
+| Identity and access | Enterprise SSO, RBAC/ABAC, group-aware data entitlements, least-privilege service identities. |
+| Secrets | Approved secret manager, rotation, no committed credentials, connector-specific scopes. |
+| Data protection | Classification, regional processing approval, encryption in transit/at rest, retention/deletion rules, and PII review. |
+| Connector governance | Read-only scopes initially, audit logs, rate limits, retry/backoff, schema contracts, and reconciliation controls. |
+| Model governance | Approved Gemini/model endpoint, prompt/data handling approval, safety policy, evaluation set, model/version tracking. |
+| RAG governance | Permission-aware document ingestion, source freshness/versioning, citation verification, vector index backup and lifecycle. |
+| Operations | Health checks, logs/metrics/traces, alerting, SLOs, DR, vulnerability management, CI/CD gates, and change management. |
+| Assurance | Threat model, privacy/security review, accessibility checks, performance/load tests, and human-in-the-loop operating procedures. |
+
+## Target production deployment reference architecture
+
+The following is a target design, not a claim about the current local PoC.
+
+```text
+Corporate browser
+  → enterprise SSO / access proxy
+  → ATLAS web application (static React deployment)
+  → ATLAS API service (FastAPI, horizontally scalable)
+      ├─ ServiceNow read adapter / webhook or scheduled sync
+      ├─ Veeva Vault, HP ALM, Drive read adapters
+      ├─ operational ticket/read-model store
+      ├─ managed vector database with metadata/security filters
+      ├─ approved Gemini endpoint through enterprise AI controls
+      ├─ secret manager + central logging/metrics/tracing
+      └─ audit/event store and monitoring
+```
+
+The recommended rollout sequence is: controlled mock-data demo, read-only
+ServiceNow pilot, permission-aware knowledge pilot, approved model deployment,
+then broader connectors and governed production operation. Write-back should be
+considered only after a separate safety, ownership, and approval design.
+
+## Delivery scope statement
+
+### Implemented in the repository today
+
+- React/Vite/Tailwind single-page experience with persistent Stats, Dashboard,
+  and Chat views plus light/dark theming.
+- FastAPI routes for tickets, dashboard data, stats, assignment groups, chat,
+  and RAG status.
+- ServiceNow-inspired canonical mock catalog, topology/task/journal rendering,
+  filters, visual analytics, anomaly detection, vector retrieval, citations,
+  and deterministic fallback.
+- Read-only assignment-group, assignee, and ticket intelligence agents embedded
+  in existing UI surfaces.
+- Connector and model configuration placeholders for a future enterprise
+  integration.
+
+### Deliberately outside the current implementation
+
+- Live ServiceNow, Veeva Vault, HP ALM, Drive, or Gemini credentials/adapters.
+- Multi-tenant persistence, SSO/RBAC, audit logging, compliance certification,
+  automated data synchronization, background workers, and production hosting.
+- Predictive ML training, automated remediation, or write-back actions.
+
+## Expanded success criteria for a sellable pilot
+
+### Demonstration acceptance
+
+- A leader can filter one or more assignment groups and see KPIs, charts, and
+  drill-down ticket counts that reconcile with the Dashboard.
+- A chart click identifies the exact in-scope canonical ticket set and opens a
+  ticket without losing the selected analytical context.
+- An anomaly/group/assignee warning is shown only when the record evidence
+  satisfies its backend rule; it includes ticket IDs and a reason.
+- Opening any topology node shows the same canonical journal, SLA state, and
+  relationship information as opening that record directly.
+- Chat returns readable, action-oriented, cited answers for ticket-specific and
+  knowledge/how-to questions with no external model key required.
+- The ticket executive plan is specific to the selected ticket and explains
+  evidence, likely contributing factor, recommended actions, and confidence.
+
+### Production pilot acceptance
+
+- Reconciliation tests show the connected read model matches approved
+  ServiceNow source records for identity, state, assignment, journal, SLA, and
+  relationship fields.
+- Security review approves identity, permissions, data boundaries, secrets,
+  logging, and model/provider handling.
+- Retrieval evaluation demonstrates source-grounding, citation accuracy,
+  permission enforcement, freshness, and acceptable failure behaviour.
+- Operational tests meet agreed availability, latency, scalability, accessibility,
+  and supportability targets.
+- Business owners approve agent recommendation quality with a documented human
+  review process before any future action automation is considered.
+
+## LEAP SAP EWM knowledge-corpus expansion (approved design)
+
+### Purpose and source-governance decision
+
+The supplied LEAP SAP EWM material will expand the central enterprise knowledge
+corpus used by the existing vector RAG pipeline. It will not be copied into
+individual tickets, embedded in frontend components, or used to create a second
+knowledge repository.
+
+The agreed governance model is **split by document**:
+
+- Controlled operating procedures and compliance-sensitive warehouse processes
+  are sourced from **Veeva Vault QMS**.
+- Foundational KT material and system-user documentation are sourced from the
+  **Google Drive KT Hub**.
+
+This division allows ATLAS to distinguish controlled SOP guidance from useful
+operational reference material while presenting both through the existing
+grounded-citation experience.
+
+### Canonical knowledge catalog additions
+
+The following records will be added to the existing central knowledge registry.
+The IDs, source type, document title, and source path are the only canonical
+identity for each document. `path_or_url` values remain integration-safe
+placeholders until approved live document URLs are supplied.
+
+| Canonical ID | Source system | Proposed title | Document class | Retrieval role |
+| --- | --- | --- | --- | --- |
+| `GDRIVE-LEAP-KT-001` | Google Drive KT Hub | LEAP Project: SAP EWM General Overview | KT / solution overview | Explains the overall LEAP landscape, warehouse tiers, roles, HUs, storage, and operating model. |
+| `VEEVA-LEAP-EWM-010` | Veeva Vault QMS | EH&S Data Transmission and Monitoring for Hazardous Materials | Controlled SOP | Safety/compliance guidance for EH&S master data, IDoc, hazardous putaway, and monitoring. |
+| `VEEVA-LEAP-EWM-011` | Veeva Vault QMS | Material Ordering (Request Hub) and Order Monitoring | Controlled operational procedure | Request Hub ordering, middleware tracing, request lifecycle, and release-job troubleshooting. |
+| `VEEVA-LEAP-EWM-012` | Veeva Vault QMS | Disposal of EWM Materials and Retained Samples | Controlled disposal SOP | Expiry/disposal monitoring, scrapping execution, hazardous exception controls, and final GI. |
+| `GDRIVE-LEAP-SUD-001` | Google Drive KT Hub | LEAP System User Documentation: Goods Receipt | System user documentation | EWM/non-EWM goods receipt, HU pulling, capacity, hazardous routing, cancellation, and labels. |
+
+### Required canonical metadata
+
+Each record above must use the existing knowledge-document schema and include,
+at minimum:
+
+| Field | Requirement |
+| --- | --- |
+| `id` | The stable canonical ID listed above. |
+| `title` | Exact document title from the catalog. |
+| `source_type` / `system` | `Veeva Vault QMS` or `Google Drive KT Hub`; never an ambiguous generic source label. |
+| `path_or_url` / `url` | Approved source link at implementation time. Until then, a clearly marked non-production placeholder that cannot be mistaken for a live controlled document. |
+| `summary` | A concise, factual description of scope and intended support use. |
+| `document_class` | `controlled_sop`, `kt_overview`, or `system_user_documentation`. |
+| `sap_modules` | At least `SAP EWM`; add connected domains such as EH&S, ERP, MuleSoft, Request Hub, RF, and warehouse operations where relevant. |
+| `topics` | Searchable functional and technical terms, including transactions, jobs, monitor paths, storage concepts, and exception names. |
+| `version`, `effective_date`, `owner`, `approval_status` | Required future live-integration metadata. Use mock-safe values only until the document owners provide authoritative values. |
+| `access_scope` | Required for a production permission-aware retrieval filter; default to mock/demo scope in the PoC. |
+
+### Content coverage to preserve during ingestion
+
+The documents must be represented as section-aware knowledge chunks, not a
+single undifferentiated paragraph. The following content is in scope.
+
+#### `GDRIVE-LEAP-KT-001` — LEAP EWM general overview
+
+- LEAP’s laboratory-consolidation objective: logistics is centralised so
+  scientists can focus on research, with SAP EWM as the warehouse control
+  system.
+- System landscape: SAP EWM, Request Hub, MuleSoft, SAP EIP, and the Arrron
+  system for the minus-80°C deep-freeze cube.
+- Primary, secondary, and tertiary storage model, including EWM ownership,
+  temperature zones, hazardous areas, transfer/arrival areas, and the fact that
+  tertiary laboratory storage is outside EWM management.
+- Handling Unit concept, permitted packaging, barcode/number-range behaviour,
+  and automated-conveyor implications.
+- External-material HU pulling concept for Signals/Infinity-managed material.
+- Hazardous storage/transport restrictions, storage class, flash point,
+  compatibility, and the special handling of human samples.
+- Roles, resource groups, RF scanner/MOP device context, and the Scullery
+  glassware operating process.
+
+#### `VEEVA-LEAP-EWM-010` — EH&S hazardous-data SOP
+
+- The three safety-critical properties: storage class, flash point in Celsius,
+  and pH value; include the rule that pH is maintained manually in EWM rather
+  than transmitted by IDoc.
+- Architecture and lineage: EH&S P08 → ERP → EWM using IDoc message type
+  `HAZARDOUSSUBSTANCE`; avoid claiming a direct P08-to-EWM integration.
+- Operator procedure: trigger/update via `HSMR02`, maintain pH in `MAT1`
+  Warehouse Data Z-fields, and review integrated data in the Warehouse Monitor
+  path `Roche Enhancement → Product`.
+- Exception and safety content: scrapping compatibility bypass, normal-bin
+  safety risk, unit-of-measure checks for flash point, and IDoc diagnostics with
+  `WE02`.
+
+#### `VEEVA-LEAP-EWM-011` — Request Hub ordering and monitoring SOP
+
+- Order ID versus Request ID hierarchy, material categories, and the mandatory
+  destination-bin rule for CUBE material.
+- Integration chain: Request Hub → MuleSoft → DataRiver → EWM OData API.
+- Troubleshooting through `/IWFWND/TRACES`, filtered by user `MULELEAP`, when
+  an accepted Request Hub order is not visible in EWM.
+- Warehouse task creation as initially locked/blocked, and release timing for
+  job `DEF_RELEASE_WHO` / program `ZL84_RELEASE_WHO` at 02:00 and 13:00.
+- Supporting Z tables `ZL84_REQ_ORDE`, `ZL84_REQ_REQUEST`, and
+  `ZL84_REQ_WHT`; monitor path `Roche Enhancement → Request Order → Request`.
+- Status lifecycle `O → P → S → C`, forward-only transition rule, cancellation
+  restriction after closure, and secondary-level no-task exception.
+
+#### `VEEVA-LEAP-EWM-012` — disposal and retained-sample SOP
+
+- Disposal-date formula based on expiration plus `ZZ1_DISPOSAL_DAYS` in `MAT1`.
+- Monitoring path `Roche Enhancements → Stock → Disposal Overview`, monthly
+  report `/SCWM/R_WME_MON_NODE_BTC_RUN`, and expected notification behaviour.
+- Execution sequence: ERP `MIGO` movement type `551` → EWM scrapping outbound
+  delivery → picking WT in queue `PRT0-SCRAP` → follow-up WT to `SCRAP-ZONE` →
+  final GI in `/SCWM/PRDO`.
+- Special SCRAP queue rule permitting compatible handling of different storage
+  classes in one transport HU only within the documented disposal scenario.
+
+#### `GDRIVE-LEAP-SUD-001` — goods-receipt SUD
+
+- EWM-managed, non-EWM, rack-pack, retained-sample, and Signals/Limfinity HU
+  pulling behaviours, including open-WT creation in RF when needed.
+- Capacity management prerequisites: product master consumption, bin capacity,
+  permitted HU types, and their relationship to common GR errors.
+- EWM goods-receipt sequence: physical check, deconsolidation, HU/label
+  creation, transport HU, conveyor routing, putaway by HU, exception `CHPD`,
+  and WT confirmation as the final GR posting point.
+- Hazardous destination logic using storage class, flash point, pH, and
+  temperature control indicators; include the statement that the minus-80°C
+  Cube is not EWM managed.
+- Inbound cancellation preconditions, rejection workflow, and product/HU label
+  printing locations.
+
+### Retrieval and answer behaviour
+
+The existing hybrid retrieval pipeline must index the documents alongside the
+current ServiceNow, HP ALM, Veeva, and Drive knowledge records. Search must
+operate across title, summary, topics, section headings, procedure steps,
+transaction codes, job/program names, monitor paths, exception names, SAP
+module tags, and document body chunks.
+
+The chat response behaviour must remain conversational and action-oriented:
+
+1. Match the user’s question to relevant LEAP sections and, where applicable,
+   live/canonical ticket evidence.
+2. Answer in concise numbered action steps rather than a raw record dump.
+3. State applicability and safety constraints, especially for hazardous
+   handling, disposal, and production transactions.
+4. Present existing clickable, platform-labelled citations for every document
+   used in the response.
+5. Never fabricate a transaction, configuration, document version, or live
+   Veeva/Drive URL. If retrieval confidence is low, say so and return the
+   existing grounded/fallback response behaviour.
+
+Examples of expected retrieval coverage:
+
+| User question | Expected sources and answer focus |
+| --- | --- |
+| “How do I fix missing hazardous material pH data?” | EH&S SOP: distinguish IDoc data from manual pH entry; guide `MAT1`, monitor verification, and cite Veeva. |
+| “Why is a Request Hub order not appearing in EWM?” | Ordering SOP: validate Request ID, trace `/IWFWND/TRACES` for `MULELEAP`, inspect integration/release status, and cite Veeva. |
+| “What is the process to scrap an expired EWM material?” | Disposal SOP: explain monitored disposal date, `MIGO` 551, `PRT0-SCRAP`, follow-up WT, and `/SCWM/PRDO`; cite Veeva. |
+| “How does LEAP secondary storage work?” | General overview: explain the three-tier model, temperature/hazardous zones, roles, and EWM boundary; cite Google Drive KT. |
+| “What do I check for a goods receipt capacity error?” | GR SUD: capacity consumption, bin setup, HU type restrictions, and label/putaway checks; cite Google Drive. |
+
+### RAG integration contracts
+
+No new database or UI is required. The implementation must reuse the existing
+central knowledge registry, `build_retrieval_documents()`, vector-store
+initialisation, `retrieve_vector_context(query, limit)`, and existing Chat
+citation cards.
+
+| Existing function / component | New responsibility for this corpus | Inputs | Expected return / effect |
+| --- | --- | --- | --- |
+| Knowledge registry in `vector_store.py` | Register the five canonical documents and their source metadata once | Structured document definitions | One source-of-truth catalog available to retrieval and citations. |
+| `build_retrieval_documents()` | Produce section-aware LEAP chunks and retain document/source metadata | Central catalog records | Search chunks with canonical ID, source system, topics, module, and `path_or_url`. |
+| `retrieve_vector_context(query, limit)` | Rank LEAP sections with existing exact/lexical/vector methods | User query and limit | Relevant chunks/citations without bypassing existing ticket retrieval. |
+| RAG context builder | Add retrieved LEAP snippets to model/fallback grounding | Retrieved chunks plus ticket context | Readable answer with traceable citations. |
+| Existing `Chat.jsx` citation card | Render Veeva/Google source label and View Document link | Returned `sources` array | No new UI surface or layout change. |
+
+### Constraints and safety requirements
+
+- Do not add, edit, or duplicate ticket records in `MOCK_DB` for this corpus
+  update. The documents are knowledge artifacts, not tickets.
+- Do not hard-code SOP content into ticket summaries, Dashboard cards, or
+  frontend components. Retrieval must originate from the canonical knowledge
+  registry.
+- Treat all contained SAP transactions and operational steps as controlled
+  reference material. Responses must advise verification against the approved
+  document and local authorisation/process requirements before action.
+- Preserve the current no-key deterministic retrieval/fallback path. Gemini
+  integration remains optional and must not become mandatory.
+- Preserve existing source records and citation styling; this addition is
+  additive and must not displace current KBA, Veeva, HP ALM, or Drive content.
+- Do not represent placeholder URLs, proposed document IDs, or inferred
+  ownership/effective dates as approved production document metadata.
+
+### Implementation steps
+
+1. Register the five catalog entries in the existing central knowledge source
+   definition with the classifications and metadata specified above.
+2. Convert each document into clean section-aware chunks, preserving procedure
+   order and transaction/job/path tokens while avoiding repeated boilerplate.
+3. Extend vector-store initialisation so the chunks are indexed from that single
+   central registry with document, source, module, topic, and URL metadata.
+4. Validate hybrid retrieval for the example questions and ensure citations
+   resolve to the correct Veeva Vault or Google Drive label/link.
+5. Adjust RAG answer formatting only as needed to keep stepwise, conversational
+   responses and preserve the no-Gemini fallback path.
+6. Run backend retrieval/API checks and the frontend build; confirm that no new
+   UI, `MOCK_DB`, or duplicated knowledge data was introduced.
+
+### Success criteria
+
+- Each supplied LEAP document has one canonical knowledge-record identity and
+  the agreed Veeva/Google ownership classification.
+- A user can retrieve each major process by natural-language intent, transaction
+  code, job name, monitor path, or exception name and receives the correct
+  source citation.
+- Hazardous-material, disposal, Request Hub, and goods-receipt responses retain
+  the stated safety and process constraints rather than offering unsafe generic
+  instructions.
+- Existing ticket-specific answers, citations, Stats, Dashboard, and local
+  deterministic fallback continue to work unchanged.
+- `MOCK_DB` remains unchanged, and no raw SOP content is duplicated in ticket
+  records or frontend components.

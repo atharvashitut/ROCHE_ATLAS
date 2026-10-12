@@ -2,3 +2,9 @@ fastapi>=0.110,<1.0
 uvicorn[standard]>=0.27,<1.0
 google-genai>=1.0,<2.0
 chromadb>=0.5,<2.0
+transformers>=4.45,<5.0
+# The local Qwen fallback is designed for CPU-only developer/PoC environments.
+# GPU deployments can replace this pin with their approved accelerator build.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+accelerate>=0.34,<2.0
