@@ -201,23 +201,31 @@ def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
 def _grounded_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
     excerpts = "\n\n".join(f"[{chunk['id']}] {chunk['title']} ({chunk['system']})\n{str(chunk['content'])[:1800]}\nCitation: {chunk['url']}" for chunk in chunks)
     live_context = _live_ticket_context(chunks)
+    ticket_status = is_ticket_status_request(query_text)
+    intent_instruction = (
+        "The user explicitly requested a ticket update. Explain that ticket's current situation, impact, latest human update, and next best action in plain English. "
+        if ticket_status else
+        "This is a general question or SOP request. Answer only what the user asked in plain conversational English or simple numbered steps. "
+        "Do not use Ticket overview, What is happening, Latest update, or Recommended actions headings. "
+    )
     return (
-        "You are Roche ATLAS, a thoughtful ITIL L2/L3 co-pilot speaking with an engineer. "
-        "Answer only from the internal evidence below, but sound natural and collaborative rather than like a field dump or API response. "
-        "For a general troubleshooting or how-to question, begin with a short direct answer, then give a safe, numbered, step by step path. "
-        "For an analysis or resolution request, organise the answer as Situation, Key risks or blockers, and Recommended actions with numbered steps. "
-        "Call out approval, GxP, rollback, or escalation gates when the evidence requires them. "
-        "For a specific ticket, explain in plain English what is happening, why it matters, what is currently blocking progress, and the best next move. "
-        "Do not recite raw labels, every field, or JSON-style key/value data. Use short headings and numbered action items. Never use hyphen characters as list markers or separators. When a source is relevant, mention its title naturally in the sentence rather than outputting source IDs, URLs, or UI instructions. "
-        "Do not invent source details.\n\n"
+        "You are ATLAS, an expert SAP Copilot. Answer only what the user specifically asks. "
+        "Speak naturally in plain text paragraphs or simple numbered lists. Do not use generic ticket headers or structural templates unless the user asked for a ticket status. "
+        "Answer only from the internal evidence below, and do not sound like a field dump or API response. "
+        f"{intent_instruction}"
+        "Call out approval, GxP, rollback, or escalation gates only when the evidence requires them. "
+        "Do not recite raw labels, every field, or JSON-style key/value data. Never use hyphen characters as list markers or separators. "
+        "When a source is relevant, mention its title naturally in the sentence rather than outputting source IDs, URLs, or UI instructions. Do not invent source details.\n\n"
         f"Question: {query_text}\n\nLive ServiceNow ticket state from MOCK_DB:\n{live_context}\n\nEnterprise evidence:\n{excerpts}"
     )
 
 
 def _fallback_prompt(query_text: str) -> str:
     return (
-        "No relevant internal enterprise evidence was retrieved. You are the Roche ATLAS ITIL L2/L3 Co-Pilot. "
-        "Respond conversationally: acknowledge the question, provide a labelled diagnostic hypothesis, safe evidence collection steps, a rollback-aware investigation plan, and escalation criteria. "
+        "No relevant internal enterprise evidence was retrieved. You are ATLAS, an expert SAP Copilot. "
+        "Answer only what the user specifically asks in plain conversational English or simple numbered steps. "
+        "Do not use generic ticket headers or structural templates unless the user asked for a ticket status. "
+        "Provide a safe diagnostic hypothesis, evidence collection steps, a rollback-aware investigation plan, and escalation criteria when relevant. "
         "Do not claim internal documents support the answer.\n\n"
         f"Question: {query_text}"
     )
@@ -231,9 +239,16 @@ def _local_generation_prompt(query_text: str, chunks: list[dict[str, object]]) -
         for chunk in chunks[:3]
     )
     live_context = _live_ticket_context(chunks[:2])[:900]
+    ticket_status = is_ticket_status_request(query_text)
+    intent_instruction = (
+        "The user asked for a ticket update; give only the relevant current status, latest update, and next action. "
+        if ticket_status else
+        "This is a general question; answer directly without Ticket overview, What is happening, Latest update, or Recommended actions headings. "
+    )
     return (
-        "Answer the user's question directly from this small set of ATLAS evidence. "
-        "Use a concise paragraph and, only when useful, short numbered actions. "
+        "You are ATLAS, an expert SAP Copilot. Answer only the user's question from this small set of ATLAS evidence. "
+        "Use a concise paragraph and, only when useful, simple numbered actions. "
+        f"{intent_instruction}"
         "Do not display raw fields, journals, topology, source IDs, URLs, or debug metadata.\n\n"
         f"Question: {query_text}\n\nLive ticket context:\n{live_context}\n\nEvidence:\n{evidence}"
     ) if chunks else _fallback_prompt(query_text)
@@ -247,6 +262,17 @@ def _is_analysis_or_resolution_request(query_text: str) -> bool:
     return _is_how_to_question(query_text) or bool(
         re.search(r"\b(analyse|analyze|analysis|resolution|root cause|recommend|what should|next steps?)\b", query_text.casefold())
     )
+
+
+def is_ticket_status_request(query_text: str) -> bool:
+    """Require an explicit record reference or update request before ticket wrapping."""
+
+    query = query_text.casefold()
+    if re.search(r"\b(?:inc|ritm|prb|chg)\d{4,}\b", query):
+        return True
+    asks_for_update = bool(re.search(r"\b(status|update|progress|what is happening|current state)\b", query))
+    names_a_record = bool(re.search(r"\b(ticket|incident|change request|change|problem|service request|ritm)\b", query))
+    return asks_for_update and names_a_record
 
 
 def is_active_ticket_list_request(query_text: str) -> bool:
@@ -314,10 +340,6 @@ def _is_ewm_queue_lock_question(query_text: str) -> bool:
     return "ewm" in query and any(term in query for term in ("qrfc", "queue lock", "queue", "sm12", "smq1", "smq2"))
 
 
-def _citation_ids(chunks: list[dict[str, object]], limit: int = 4) -> str:
-    return " ".join(f"[{chunk['id']}]" for chunk in chunks[:limit])
-
-
 def _topic_action_items(query_text: str) -> list[str] | None:
     """Return concise local guidance for the high-value SAP support domains."""
 
@@ -362,19 +384,16 @@ def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
     if not chunks:
         return (
             "I do not see an internal procedure that directly covers this yet, but we can still approach it safely.\n\n"
-            "Recommended actions\n"
             "1. Confirm the impact, scope, timestamps, recent changes, and a known good comparison path.\n"
             "2. Preserve logs, monitoring signals, and correlation IDs before any retry or restart.\n"
             "3. Check the owning service, dependencies, rollback route, and change control requirements.\n"
             "4. Escalate with the collected evidence and keep the requester updated in the ServiceNow journal."
         )
 
-    citations = _citation_ids(chunks)
     if _is_how_to_question(query_text) and _is_ewm_queue_lock_question(query_text):
         return (
-            "Yes. Here is a safe, controlled way to work through an EWM qRFC queue lock. "
-            f"The linked source cards contain the approved detail. {citations}\n\n"
-            "Recommended actions\n"
+            "Here is a safe, controlled way to work through an EWM qRFC queue lock. "
+            "\n\n"
             "1. Start by confirming the affected warehouse process, queue, business impact, and the approved incident or change record.\n"
             "2. In SM12, identify the lock owner, client, object, and lock age. Capture evidence first; do not delete a lock until active ownership is understood.\n"
             "3. Inspect SMQ1 for outbound queue status, destination, LUW error text, and retry history. Then inspect SMQ2 for inbound blocks or predecessor queues.\n"
@@ -382,7 +401,6 @@ def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
             "5. Validate queue drain, warehouse task creation, goods issue posting, and that the lock does not return. Document business confirmation and validation evidence."
         )
 
-    source_titles = "; ".join(str(chunk["title"]) for chunk in chunks[:3])
     if _is_analysis_or_resolution_request(query_text):
         topic_actions = _topic_action_items(query_text)
         actions = topic_actions or [
@@ -391,19 +409,14 @@ def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
             "Validate the business outcome, record the evidence, and update the ServiceNow journal with the result.",
         ]
         return (
-            "I found internal guidance that is relevant to this. Let’s take the controlled path rather than making a blind retry.\n\n"
-            f"Useful references\n{source_titles}\n{citations}\n\n"
-            "Recommended actions\n"
+            "Here is the controlled path supported by the available internal guidance.\n\n"
             + "\n".join(f"{index}. {action}" for index, action in enumerate(actions, start=1))
         )
     return (
         "I found relevant internal context for that question.\n\n"
-        "Recommended actions\n"
         "1. Review the current service evidence and latest human update.\n"
         "2. Follow the controlled procedure before changing production state.\n"
-        "3. Capture confirmation before closure.\n\n"
-        f"Supporting sources\n{citations}\n\n"
-        "Tell me whether you are diagnosing, planning a change, or validating recovery and I can narrow this to the exact next checks."
+        "3. Capture confirmation before closure."
     )
 
 
@@ -425,17 +438,15 @@ def compose_conversational_ticket_response(ticket: Any, query_text: str, grounde
     else:
         situation += " The support team is actively working the recovery path."
     next_move = (ticket.ai_resolution_guide or "Validate the current evidence, coordinate the owning team, and confirm the outcome with the requester.").split(". ")[0].rstrip(".")
+    attribution = next((line for line in grounded_answer.splitlines() if line.startswith("This guidance is grounded in ")), "")
     return (
-        f"Ticket overview\n{ticket.number}\n\n"
-        f"What is happening\n{situation}\n\n"
-        f"Latest update\n{latest_comment}\n\n"
-        "Recommended actions\n"
+        f"{ticket.number} is currently {ticket.state}. {situation}\n\n"
+        f"Latest update: {latest_comment}\n\n"
+        "Next steps\n"
         f"1. {next_move}.\n"
         "2. Confirm the current business impact and any dependency with the owning team.\n"
-        "3. Validate the outcome with the requester and record the evidence before closure.\n\n"
-        "Grounded guidance\n"
-        f"{grounded_answer}\n\n"
-        "Open the source cards below for the supporting procedures and evidence."
+        "3. Validate the outcome with the requester and record the evidence before closure."
+        + (f"\n\n{attribution}" if attribution else "")
     )
 
 

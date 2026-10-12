@@ -26,7 +26,7 @@ from .models import (
     is_sla_breached,
     resolve_child_tickets,
 )
-from .rag_engine import compose_conversational_ticket_response, initialize_vector_db, query_hybrid_rag, rag_status, retrieve_vector_context, warm_local_generation
+from .rag_engine import compose_conversational_ticket_response, initialize_vector_db, is_ticket_status_request, query_hybrid_rag, rag_status, retrieve_vector_context, warm_local_generation
 
 
 class ChatQuery(BaseModel):
@@ -882,12 +882,13 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
     )
     rag_result = query_hybrid_rag(query.message)
     ticket_list_intent = rag_result.get("intent") == "active_ticket_list" and not query.ticket_id
-    if not ticket_list_intent:
+    ticket_status_intent = bool(query.ticket_id or found_id or is_ticket_status_request(query.message))
+    if ticket_status_intent and not ticket_list_intent:
         found_id = found_id or find_ticket_from_natural_language(query_text)
     # Semantic retrieval resolves conversational references that are not a
     # literal ServiceNow number. The selected record is still hydrated from
     # the canonical MOCK_DB-backed repository below.
-    if not ticket_list_intent:
+    if ticket_status_intent and not ticket_list_intent:
         found_id = found_id or next((ticket_id for ticket_id in rag_result["ticket_ids"] if ticket_id in ticket_db), None)
     else:
         found_id = None
@@ -902,17 +903,21 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         normalized_id = found_id if found_id and ticket_db[found_id].type == "CHG" else "CHG0092100"
     else:
         action = "chat"
-        normalized_id = found_id
+        normalized_id = found_id if ticket_status_intent else None
 
     normalized_query = query.model_copy(update={"ticket_id": normalized_id, "action": action})
     response = chat_response(normalized_query)
-    ticket = ticket_db.get(normalized_id) if normalized_id else None
+    ticket = ticket_db.get(normalized_id) if normalized_id and (action != "chat" or ticket_status_intent) else None
     if action == "chat":
         response = rag_result["answer"]
         if ticket:
             response = compose_conversational_ticket_response(ticket, query.message, response)
     if ticket and ticket.similar_records:
-        response = "⚠️ **AI Similarity Detection Triggered:** I found historical patterns matching this issue.\n\n" + response
+        related = ticket.similar_records[0]
+        response += (
+            f"\n\nA potentially related record is {related['id']}, currently {related['state']}. "
+            f"ATLAS found a {related['score']}% similarity to {related['title']}."
+        )
     return {
         "response": response,
         "action": action,
