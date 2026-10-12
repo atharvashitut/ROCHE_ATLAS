@@ -83,6 +83,13 @@ def initialize_vector_db() -> None:
     VECTOR_STORE.sync(build_retrieval_documents())
 
 
+def warm_local_generation() -> None:
+    """Warm cached local weights after startup without delaying API availability."""
+
+    if gemini_client is None:
+        LOCAL_OPEN_SOURCE_GENERATOR.warm_up()
+
+
 def _query_terms(text: str) -> set[str]:
     ignored = {"a", "an", "and", "are", "can", "do", "for", "how", "i", "in", "is", "it", "me", "of", "on", "please", "show", "tell", "the", "this", "to", "what", "with", "status", "ticket"}
     return {term for term in re.findall(r"[a-z0-9_/-]+", text.casefold()) if len(term) > 1 and term not in ignored}
@@ -214,6 +221,22 @@ def _fallback_prompt(query_text: str) -> str:
         "Do not claim internal documents support the answer.\n\n"
         f"Question: {query_text}"
     )
+
+
+def _local_generation_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
+    """Keep local CPU generation focused enough to meet the Chat response budget."""
+
+    evidence = "\n\n".join(
+        f"{chunk['title']} ({chunk['system']}): {str(chunk['content'])[:700]}"
+        for chunk in chunks[:3]
+    )
+    live_context = _live_ticket_context(chunks[:2])[:900]
+    return (
+        "Answer the user's question directly from this small set of ATLAS evidence. "
+        "Use a concise paragraph and, only when useful, short numbered actions. "
+        "Do not display raw fields, journals, topology, source IDs, URLs, or debug metadata.\n\n"
+        f"Question: {query_text}\n\nLive ticket context:\n{live_context}\n\nEvidence:\n{evidence}"
+    ) if chunks else _fallback_prompt(query_text)
 
 
 def _is_how_to_question(query_text: str) -> bool:
@@ -462,7 +485,7 @@ def query_hybrid_rag(query_text: str) -> dict[str, Any]:
         except Exception:
             pass
     elif not ticket_list_intent:
-        local_answer = LOCAL_OPEN_SOURCE_GENERATOR.generate(prompt)
+        local_answer = LOCAL_OPEN_SOURCE_GENERATOR.generate(_local_generation_prompt(query_text, chunks))
         if local_answer:
             answer = local_answer
             model_used = f"local:{LOCAL_OPEN_SOURCE_GENERATOR.model_id}"

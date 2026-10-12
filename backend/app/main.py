@@ -26,7 +26,7 @@ from .models import (
     is_sla_breached,
     resolve_child_tickets,
 )
-from .rag_engine import compose_conversational_ticket_response, initialize_vector_db, query_hybrid_rag, rag_status, retrieve_vector_context
+from .rag_engine import compose_conversational_ticket_response, initialize_vector_db, query_hybrid_rag, rag_status, retrieve_vector_context, warm_local_generation
 
 
 class ChatQuery(BaseModel):
@@ -571,6 +571,7 @@ def initialize_canonical_vector_db() -> None:
     """Index the current MOCK_DB and connector corpus before serving requests."""
 
     initialize_vector_db()
+    warm_local_generation()
 
 
 @app.get("/api/dashboard/tickets")
