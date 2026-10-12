@@ -210,6 +210,31 @@ class LocalVectorStore:
                         self._using_chroma = False
             self._fingerprint = fingerprint
 
+    def reset(self) -> None:
+        """Remove the derived local index so the canonical corpus can be rebuilt.
+
+        This intentionally never touches source tickets or connector records;
+        it only clears recreatable embeddings and Chroma collection state.
+        """
+
+        with self._lock:
+            self._fingerprint = ""
+            self._documents.clear()
+            self._vectors.clear()
+            self._using_chroma = False
+            if chromadb is None:
+                self._collection = None
+                self._client = None
+                return
+            try:
+                self.path.mkdir(parents=True, exist_ok=True)
+                self._client = chromadb.PersistentClient(path=str(self.path))
+                self._client.delete_collection(self.collection_name)
+            except Exception:
+                # A missing collection is already equivalent to a clean index.
+                pass
+            self._collection = None
+
     def query(self, query_text: str, limit: int = 8) -> list[RetrievedDocument]:
         """Return the highest-relevance canonical chunks for a user query."""
 

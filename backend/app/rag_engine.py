@@ -29,6 +29,8 @@ from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, se
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GENERATION_MODEL = os.getenv("ATLAS_GEMINI_GENERATION_MODEL", "gemini-1.5-flash")
+KNOWLEDGE_CHUNK_SIZE = 900
+KNOWLEDGE_CHUNK_OVERLAP = 150
 try:
     gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY and genai else None
 except Exception:  # pragma: no cover - preserve local availability on malformed credentials
@@ -43,18 +45,48 @@ def _task_text(tasks: list[dict[str, object]]) -> str:
     return " ".join(" ".join(str(task.get(field, "")) for field in ("number", "short_description", "title", "state", "close_notes")) for task in tasks)
 
 
+def _knowledge_chunks(text: str, *, size: int = KNOWLEDGE_CHUNK_SIZE, overlap: int = KNOWLEDGE_CHUNK_OVERLAP) -> list[str]:
+    """Split knowledge sources into coherent, overlapping retrieval units."""
+
+    normalized = " ".join(text.split())
+    if len(normalized) <= size:
+        return [normalized]
+    chunks: list[str] = []
+    start = 0
+    while start < len(normalized):
+        end = min(len(normalized), start + size)
+        if end < len(normalized):
+            # Keep complete sentences together. Semicolons are frequently
+            # used inside a single regulated step, so splitting on one creates
+            # duplicated partial instructions across overlapping chunks.
+            boundary = normalized.rfind(". ", start + size // 2, end)
+            if boundary > start:
+                end = boundary + 1
+        chunks.append(normalized[start:end].strip())
+        if end >= len(normalized):
+            break
+        overlap_start = max(end - overlap, start + 1)
+        # Start the next chunk at a sentence boundary where possible. This
+        # retains overlap without creating clipped sentence fragments that
+        # would make a displayed procedure look incomplete.
+        prior_boundary = normalized.rfind(". ", start, overlap_start)
+        start = prior_boundary + 2 if prior_boundary >= start else overlap_start
+    return chunks
+
+
 def build_retrieval_documents() -> list[RetrievalDocument]:
     """Create stable, source-specific chunks from the canonical data stores."""
 
     documents: list[RetrievalDocument] = []
     for source in connector_documents():
-        documents.append(RetrievalDocument(
-            id=f"source:{source['id']}", title=source["title"],
-            content=f"{source['summary']}\n{source['content']}\nTags: {' '.join(source['tags'])}",
-            source_type=source["source_type"], system=source["system"], connector=source["connector"],
-            url=source["url"], record_type="knowledge", ticket_number=",".join(source["ticket_numbers"]),
-            ticket_id=",".join(source["ticket_numbers"]), assignment_group="Enterprise Knowledge", module="Enterprise Knowledge", section="knowledge_article",
-        ))
+        for index, chunk in enumerate(_knowledge_chunks(str(source["content"]))):
+            documents.append(RetrievalDocument(
+                id=f"source:{source['id']}:chunk:{index}", title=source["title"],
+                content=f"{chunk}\nTags: {' '.join(source['tags'])}",
+                source_type=source["source_type"], system=source["system"], connector=source["connector"],
+                url=source["url"], record_type="knowledge", ticket_number=",".join(source["ticket_numbers"]),
+                ticket_id=",".join(source["ticket_numbers"]), assignment_group="Enterprise Knowledge", module="Enterprise Knowledge", section=f"knowledge_chunk_{index}",
+            ))
     for ticket in central_ticket_records().values():
         number = ticket.number
         ticket_url = f"/api/tickets/{number}"
@@ -100,6 +132,13 @@ def initialize_vector_db() -> None:
     """Build the vector DB from the live canonical ticket catalog at startup."""
 
     VECTOR_STORE.sync(build_retrieval_documents())
+
+
+def reindex_vector_db() -> None:
+    """Clear derived embeddings and rebuild them from canonical live sources."""
+
+    VECTOR_STORE.reset()
+    initialize_vector_db()
 
 
 def warm_local_generation() -> None:
@@ -148,6 +187,9 @@ def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, o
     explicit_tickets = _explicit_ticket_numbers(query_text)
     selected: list[dict[str, object]] = []
     selected_ids: set[str] = set()
+    # SOP and SUD questions need enough adjacent source evidence to preserve
+    # prerequisites, approvals, and the complete remediation sequence.
+    selection_limit = 8 if _is_knowledge_procedure_request(query_text) else 6
     # A direct ServiceNow number is an authoritative context selection. Add
     # its overview/journal/task chunks before approximate vector results.
     for document in documents:
@@ -174,26 +216,28 @@ def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, o
         key=lambda item: (item[0], item[1].record_type == "knowledge"),
         reverse=True,
     ):
-        if len(selected) >= 6:
+        if len(selected) >= selection_limit:
             break
         payload = serialize_retrieved(RetrievedDocument(document, min(1.0, lexical_hits / max(1, len(terms)))))
         payload["lexical_hits"] = lexical_hits
         selected.append(payload)
         selected_ids.add(document.id)
     for result in VECTOR_STORE.query(query_text, limit=limit):
-        if len(selected) >= 6:
+        if len(selected) >= selection_limit:
             break
         document = result.document
         if document.id in selected_ids:
             continue
         searchable = f"{document.title} {document.content}".casefold()
         lexical_hits = sum(term in searchable for term in terms)
-        semantic_enough = result.score >= 0.62 and VECTOR_STORE.embedder.mode == "gemini"
-        if lexical_hits or semantic_enough:
+        # Keep top-k semantic results even when an embedding score is modest:
+        # SAP transaction terminology is sparse and valid SUD chunks can be
+        # missed by an arbitrary similarity cutoff.
+        if lexical_hits or result.score > 0:
             payload = serialize_retrieved(result)
             payload["lexical_hits"] = lexical_hits
             selected.append(payload)
-    return selected[:6]
+    return selected[:selection_limit]
 
 
 def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
@@ -232,6 +276,7 @@ def _grounded_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
         "Reply in the same language as the user whenever the configured model can do so. Speak naturally in plain text paragraphs or simple numbered lists. Do not use generic ticket headers or structural templates unless the user asked for a ticket status. "
         "Answer only from the internal evidence below, and do not sound like a field dump or API response. "
         f"{intent_instruction}"
+        "When retrieved evidence is a SUD or SOP, provide a complete, step-by-step technical procedure. Include every relevant prerequisite, SAP transaction, approval role, control, and remediation step present in the retrieved context. Never truncate it into a one-line summary unless the user explicitly asks for a brief answer. "
         "Call out approval, GxP, rollback, or escalation gates only when the evidence requires them. "
         "Do not recite raw labels, every field, or JSON-style key/value data. Never use hyphen characters as list markers or separators. "
         "When a source is relevant, mention its title naturally in the sentence rather than outputting source IDs, URLs, or UI instructions. Do not invent source details.\n\n"
@@ -270,7 +315,7 @@ def _local_generation_prompt(query_text: str, chunks: list[dict[str, object]]) -
     )
     return (
         "You are ATLAS, an expert SAP Copilot. Answer only the user's question from this small set of ATLAS evidence. "
-        "Reply in the same language as the user. Use a concise paragraph and, only when useful, simple numbered actions. "
+        "Reply in the same language as the user. For a SUD or SOP question, provide complete numbered steps from the supplied evidence; do not compress them into a one-line answer unless the user asks for a summary. "
         f"{intent_instruction}"
         "Do not display raw fields, journals, topology, source IDs, URLs, or debug metadata.\n\n"
         f"Question: {query_text}\n\nLive ticket context:\n{live_context}\n\nEvidence:\n{evidence}"
@@ -1228,35 +1273,93 @@ def _retrieved_knowledge_answer(query_text: str, chunks: list[dict[str, object]]
     """
 
     terms = _query_terms(query_text)
-    best: tuple[int, str, list[str]] | None = None
+    best: tuple[int, str, list[str], str] | None = None
     for chunk in chunks:
         if chunk.get("record_type") != "knowledge":
             continue
-        # Retrieval chunks begin with the document summary. Prefer the source
-        # body so a procedural answer does not merely repeat the article title.
-        content = str(chunk.get("content", "")).split("Tags:", 1)[0]
-        if "\n" in content:
-            content = content.split("\n", 1)[1]
+        # Knowledge chunks contain source body plus a trailing tag line. Keep
+        # the full body: source chunking no longer prepends a summary line.
+        content = str(chunk.get("content", "")).split("Tags:", 1)[0].strip()
         sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", content) if sentence.strip()]
+        scored_sentences = [
+            (sum(term in sentence.casefold() for term in terms), index, sentence)
+            for index, sentence in enumerate(sentences)
+        ]
         ranked = sorted(
-            ((sum(term in sentence.casefold() for term in terms), index, sentence) for index, sentence in enumerate(sentences)),
+            scored_sentences,
             key=lambda item: item[0],
             reverse=True,
         )
         if not ranked or ranked[0][0] <= 0:
             continue
         _, first_index, _ = ranked[0]
-        # Preserve the source's procedural sequence after the best-matching
-        # sentence instead of assembling unrelated high-scoring fragments.
-        # Four adjacent sentences retain a complete diagnostic and remediation
-        # sequence without turning the response into an article dump.
-        matched = sentences[first_index:first_index + 4]
+        # Use the strongest source sentence only. Broad terms such as
+        # “inbound” occur throughout a runbook and made a neighbouring-window
+        # approach append unrelated QID or queue procedures to one error fix.
+        matched = [sentences[first_index]]
         if matched and (best is None or ranked[0][0] > best[0]):
-            best = (ranked[0][0], str(chunk.get("title", "internal procedure")), matched)
+            best = (ranked[0][0], str(chunk.get("title", "internal procedure")), matched, str(chunk.get("id", "")))
     if not best:
         return None
-    _, title, sentences = best
-    return f"According to {title}, {' '.join(sentences)}"
+    _, title, sentences, source_chunk_id = best
+
+    broad_procedure = (
+        _is_knowledge_procedure_request(query_text)
+        and not _has_specific_troubleshooting_signal(query_text)
+        and not _explicit_ticket_numbers(query_text)
+    )
+    if broad_procedure and ":chunk:" in source_chunk_id:
+        # Parent-document expansion: vector search chooses the relevant
+        # document chunk, then the canonical siblings restore its complete
+        # controlled procedure in source order. This avoids relying on a
+        # fragile top-k ordering for long regulated SOPs.
+        source_prefix = source_chunk_id.rsplit(":chunk:", 1)[0]
+        source_chunks = [
+            document for document in build_retrieval_documents()
+            if document.id.startswith(f"{source_prefix}:chunk:")
+        ]
+        source_chunks.sort(key=lambda document: int(document.id.rsplit(":chunk:", 1)[1]))
+        seen_sentences: set[str] = set()
+        expanded: list[str] = []
+        for document in source_chunks:
+            content = document.content.split("Tags:", 1)[0]
+            for sentence in re.split(r"(?<=[.!?])\s+", content):
+                normalized = sentence.strip()
+                identity = normalized.casefold()
+                if normalized and identity not in seen_sentences:
+                    seen_sentences.add(identity)
+                    expanded.append(normalized)
+        if expanded:
+            return "\n".join([
+                title,
+                "",
+                "Complete procedure",
+                *[f"{index}. {sentence.rstrip('.')}." for index, sentence in enumerate(expanded, start=1)],
+            ])
+
+    steps: list[str] = []
+    for sentence in sentences:
+        # Semicolons commonly separate the individual execution actions in
+        # the curated SUDs. Retain full sentences otherwise, so the formatter
+        # works for every connector without source-specific hardcoding.
+        fragments = [fragment.strip(" ,") for fragment in re.split(r";\s+", sentence) if fragment.strip(" ,")]
+        for fragment in fragments:
+            steps.extend(
+                piece.strip(" ,")
+                for piece in re.split(
+                    r",\s+(?=(?:verify|resynchronise|calculate|save|retry|record|inspect|confirm|validate|create|update|use|open|set|adjust|activate|resolve|capture|repost)\b)",
+                    fragment,
+                    flags=re.IGNORECASE,
+                )
+                if piece.strip(" ,")
+            )
+    normalised_steps = [step[:1].upper() + step[1:] if step else step for step in steps]
+    return "\n".join([
+        title,
+        "",
+        "Recommended steps",
+        *[f"{index}. {step.rstrip('.')}." for index, step in enumerate(normalised_steps, start=1)],
+    ])
 
 
 def _has_authoritative_playbook(query_text: str) -> bool:
@@ -1404,6 +1507,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     listed_ticket_ids: list[str] = []
     assignees = _mentioned_assignees(query_text)
     groups = _mentioned_assignment_groups(query_text)
+    modules = _requested_sap_modules(query_text)
     sla_health_request = _is_sla_health_question(query_text)
     operational_scope_intent = False
     chart_data: dict[str, object] | None = None
@@ -1413,7 +1517,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     # A module-specific queue question is a scoped operational lookup.  Keep
     # it on the list path even when phrased as "how many", so the response
     # provides both the truthful count and the records behind that count.
-    module_queue_intent = not knowledge_procedure_intent and bool(_requested_sap_modules(query_text)) and bool(
+    module_queue_intent = not knowledge_procedure_intent and bool(modules) and bool(
         re.search(r"\b(tickets?|incidents?|queue|work items?)\b", query_text.casefold())
     )
     # A module queue request (for example, "how many PLM tickets are in the
@@ -1423,7 +1527,8 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     dashboard_filters = _dashboard_query_filters(query_text)
     # A dashboard-level SLA health question is the explicit executive-chart
     # request. Other broad knowledge or general metric questions stay text
-    # only unless a named group or assignee asks for SLA health or at-risk work.
+    # only unless a named group, assignee, or SAP module asks for SLA health
+    # or at-risk work.
     dashboard_sla_chart_intent = (
         not knowledge_procedure_intent
         and sla_health_request
@@ -1432,7 +1537,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     scoped_health_visual_intent = (
         not knowledge_procedure_intent
         and (
-            (bool(assignees or groups) and (sla_health_request or str(dashboard_filters["sla_mode"]) == "at_risk"))
+            (bool(assignees or groups or modules) and (sla_health_request or str(dashboard_filters["sla_mode"]) == "at_risk"))
             or dashboard_sla_chart_intent
         )
     )
@@ -1445,7 +1550,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     # "at-risk", "P1", or "Awaiting Vendor" routes through the reusable
     # canonical field filter instead.
     dashboard_filter_intent = not scoped_health_visual_intent and not knowledge_procedure_intent and _is_dashboard_filter_request(query_text) and (
-        not (assignees or groups) or has_refining_filter
+        not (assignees or groups or modules) or has_refining_filter
     )
     stats_intent = (
         _is_metrics_intent(query_text)
@@ -1457,6 +1562,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
         and not knowledge_procedure_intent
         and not assignees
         and not groups
+        and not modules
     )
     live_metric_intent = stats_intent or scoped_health_visual_intent
     if direct_ticket is not None:
