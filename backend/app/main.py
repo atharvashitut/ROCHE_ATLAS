@@ -579,8 +579,22 @@ def initialize_canonical_vector_db() -> None:
 
 
 @app.get("/api/dashboard/tickets")
-def list_dashboard_tickets(assignee: str | None = None, assignment_group: str | None = None) -> dict[str, list[dict]]:
+def list_dashboard_tickets(
+    assignee: str | None = None,
+    assignment_group: str | None = None,
+    include_closed: bool = False,
+) -> dict[str, list[dict]]:
+    """Return the active canonical queue by default.
+
+    Dashboard, Stats, and Chat use the same active operational scope. Historical
+    records remain available explicitly through ``include_closed=true`` rather
+    than silently changing the live queue total.
+    """
+
     tickets = list(central_ticket_records().values())
+    if not include_closed:
+        closed_states = {"Closed", "Resolved", "Closed Complete", "Closed Incomplete", "Closed Skipped", "Canceled"}
+        tickets = [ticket for ticket in tickets if ticket.state not in closed_states]
     if assignee:
         tickets = [ticket for ticket in tickets if ticket.assignee == assignee]
     if assignment_group:
@@ -628,8 +642,14 @@ def get_dashboard_stats(
     sap_module: list[str] = Query(default=[]),
     start_date: date | None = None,
     end_date: date | None = None,
+    active_only: bool = True,
 ) -> dict[str, object]:
-    """Return canonical ServiceNow-style operational analytics for the Stats tab."""
+    """Return canonical active-queue analytics for Dashboard, Stats, and Chat.
+
+    Callers may set ``active_only=false`` for a historical reporting view.
+    The operational UI intentionally defaults to active work so every tab
+    reports the same current queue total.
+    """
 
     report_end = end_date or CANONICAL_REPORT_END
     report_start = start_date or CANONICAL_REPORT_START
@@ -646,6 +666,8 @@ def get_dashboard_stats(
     ]
 
     closed_states = {"Closed", "Resolved", "Closed Complete", "Closed Incomplete", "Closed Skipped", "Canceled"}
+    if active_only:
+        tickets = [ticket for ticket in tickets if ticket.state not in closed_states]
     active_states = {"In Progress", "Implement", "Root Cause Analysis", "Assess", "Authorize", "Scheduled", "Review", "Fix in Progress", "Work in Progress"}
     record_types = ("INC", "RITM", "PRB", "CHG")
     type_colors = {"INC": "#38bdf8", "RITM": "#8b5cf6", "PRB": "#f59e0b", "CHG": "#10b981"}
@@ -773,6 +795,7 @@ def get_dashboard_stats(
             "assignment_groups": sorted(selected_groups),
             "assignees": sorted(assignee),
             "sap_modules": sorted(sap_module),
+            "active_only": active_only,
             "start_date": report_start.isoformat(),
             "end_date": report_end.isoformat(),
         },
@@ -862,10 +885,11 @@ def get_live_stats(
     sap_module: list[str] = Query(default=[]),
     start_date: date | None = None,
     end_date: date | None = None,
+    active_only: bool = True,
 ) -> dict[str, object]:
     """Canonical stats alias for integrations outside the dashboard route."""
 
-    return get_dashboard_stats(assignment_group, group_filter_active, assignee, sap_module, start_date, end_date)
+    return get_dashboard_stats(assignment_group, group_filter_active, assignee, sap_module, start_date, end_date, active_only)
 
 
 @app.get("/api/knowledge/sources")

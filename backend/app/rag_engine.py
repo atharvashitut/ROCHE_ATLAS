@@ -278,13 +278,26 @@ def _local_generation_prompt(query_text: str, chunks: list[dict[str, object]]) -
 
 
 def _is_how_to_question(query_text: str) -> bool:
-    return bool(re.search(r"\b(how|fix|resolve|recover|clear|troubleshoot|steps?|guide)\b", query_text.casefold()))
+    # "How many" is a reporting request, not a procedural question. Keep it
+    # out of the SOP guard so quantified Dashboard queries retain their
+    # canonical filter route.
+    return bool(re.search(r"\b(?:how\s+(?:do|to|can|should)|fix|resolve|recover|clear|troubleshoot|steps?|guide)\b", query_text.casefold()))
 
 
 def _is_analysis_or_resolution_request(query_text: str) -> bool:
     return _is_how_to_question(query_text) or bool(
         re.search(r"\b(analyse|analyze|analysis|resolution|root cause|recommend|what should|next steps?)\b", query_text.casefold())
     )
+
+
+def _is_knowledge_procedure_request(query_text: str) -> bool:
+    """Protect SOP/SUD questions from operational chart intent routing."""
+
+    query = query_text.casefold()
+    return _is_analysis_or_resolution_request(query_text) or bool(re.search(
+        r"\b(?:explain|process|procedure|workflow|runbook|sop|sud|documentation|instructions?|guide|steps?|how does)\b",
+        query,
+    ))
 
 
 def is_ticket_status_request(query_text: str) -> bool:
@@ -416,7 +429,14 @@ def _is_metrics_intent(query_text: str) -> bool:
     return any(term in query for term in metric_terms)
 
 
-def _live_stats_snapshot(query_text: str) -> dict[str, Any]:
+def _is_sla_health_question(query_text: str) -> bool:
+    """Identify an SLA-health view without treating a queue request as one."""
+
+    query = query_text.casefold()
+    return bool(re.search(r"\b(?:sla\s+health|sla\s+status|sla\s+performance|health\s+of\s+sla)\b", query))
+
+
+def _live_stats_snapshot(query_text: str, *, active_only: bool = True) -> dict[str, Any]:
     """Read the exact Stats-tab aggregation without importing it at module load.
 
     `main.py` imports this module, so the import is deliberately delayed until
@@ -436,6 +456,7 @@ def _live_stats_snapshot(query_text: str) -> dict[str, Any]:
         sap_module=modules,
         start_date=None,
         end_date=None,
+        active_only=active_only,
     )
 
 
@@ -446,12 +467,12 @@ def _stats_scope_label(stats: dict[str, Any]) -> str:
     groups = filters.get("assignment_groups", [])
     modules = filters.get("sap_modules", [])
     assignees = filters.get("assignees", [])
-    if modules:
-        return f"{' and '.join(modules)} module scope"
     if assignees:
         return f"{', '.join(assignees)}'s assigned queue"
     if len(groups) == 1:
         return f"{groups[0]} assignment-group scope"
+    if modules:
+        return f"{' and '.join(modules)} module scope"
     return "full canonical enterprise reporting scope"
 
 
@@ -534,7 +555,7 @@ def _stats_answer(
     # same immutable Stats payload rather than from model generation.
     context_lines = (stats_context or _stats_context_block(stats)).splitlines()
     scope_value = next((line.removeprefix("Scope: ") for line in context_lines if line.startswith("Scope: ")), _stats_scope_label(stats))
-    scope = f"the {scope_value}"
+    scope = scope_value if scope_value.endswith("'s assigned queue") else f"the {scope_value}"
 
     if any(term in query for term in ("unusual", "anomaly", "abnormal")):
         insights = stats.get("anomaly_detection", {}).get("insights", [])
@@ -548,12 +569,20 @@ def _stats_answer(
             if ticket.number in impacted
         })
         lines = [
-            f"The strongest current anomaly is {insight['title']}.",
-            f"{insight['explanation']} Confidence is {insight['confidence_score']}%.",
-            f"Affected tickets: {', '.join(impacted) or 'none recorded'}.",
-            f"Assignment-group evidence: {'; '.join(str(item) for item in insight.get('supporting_evidence', [])[:3])}.",
-            f"Relevant assignees: {', '.join(impacted_assignees) or 'not recorded'}.",
-            f"Recommended action: {insight['recommended_action']}.",
+            f"AI Operations Insight — {scope}",
+            "",
+            "Finding",
+            insight["title"],
+            "",
+            "Evidence",
+            f"• {insight['explanation']}",
+            f"• Confidence: {insight['confidence_score']}%.",
+            f"• Affected tickets: {', '.join(impacted) or 'none recorded'}.",
+            f"• Assignment-group evidence: {'; '.join(str(item) for item in insight.get('supporting_evidence', [])[:3])}.",
+            f"• Relevant assignees: {', '.join(impacted_assignees) or 'not recorded'}.",
+            "",
+            "Recommended Action",
+            f"• {insight['recommended_action']}.",
         ]
         return "\n\n".join(lines), impacted
 
@@ -569,20 +598,42 @@ def _stats_answer(
             [ticket["number"] for ticket in stats.get("ticket_index", []) if ticket["assignee"] == top["assignee"]],
         )
 
-    if any(term in query for term in ("sla", "breach", "breached", "percentage", "percent")):
+    if any(term in query for term in ("sla", "breach", "breached", "percentage", "percent", "at risk")):
         return (
-            f"In {scope}, there are {active_total} active work items across {summary['total_tickets']} records in the reporting window. "
-            f"SLA applies to {eligible} INC/RITM records: {breached} breached, {sla_segments.get('At Risk', 0)} at risk, and {sla_segments.get('On Track', 0)} on track. "
-            f"The current breach rate is {breach_rate}%.",
+            "\n".join([
+                f"SLA Health — {scope}",
+                "",
+                "Current Position",
+                f"• Active work items: {active_total}.",
+                f"• SLA-tracked incidents and requests: {eligible}.",
+                f"• Current breach rate: {breach_rate}%.",
+                "",
+                "SLA Breakdown",
+                f"• Breached: {breached}.",
+                f"• At risk: {sla_segments.get('At Risk', 0)}.",
+                f"• On track: {sla_segments.get('On Track', 0)}.",
+            ]),
             listed,
         )
 
     return (
-        f"In {scope}, there are {active_total} active work items out of {summary['total_tickets']} total records. "
-        f"{summary['in_progress']} are in progress, {summary['on_hold']} are on hold, and {breached} SLA-tracked records are breached. "
-        f"On-hold dependencies include {summary['awaiting_caller']} awaiting caller, {summary['awaiting_change']} awaiting change, "
-        f"{summary['awaiting_child']} awaiting child, {summary['awaiting_vendor']} awaiting vendor, "
-        f"{summary['awaiting_problem']} awaiting problem, and {summary['awaiting_parent']} awaiting parent.",
+        "\n".join([
+            f"Operational Summary — {scope}",
+            "",
+            "Current Workload",
+            f"• Active work items: {active_total} of {summary['total_tickets']} records in scope.",
+            f"• In progress: {summary['in_progress']}.",
+            f"• On hold: {summary['on_hold']}.",
+            f"• SLA breached: {breached}.",
+            "",
+            "On-Hold Dependencies",
+            f"• Awaiting caller: {summary['awaiting_caller']}.",
+            f"• Awaiting change: {summary['awaiting_change']}.",
+            f"• Awaiting child: {summary['awaiting_child']}.",
+            f"• Awaiting vendor: {summary['awaiting_vendor']}.",
+            f"• Awaiting problem: {summary['awaiting_problem']}.",
+            f"• Awaiting parent: {summary['awaiting_parent']}.",
+        ]),
         listed,
     )
 
@@ -625,12 +676,237 @@ def _requested_sap_modules(query_text: str) -> set[str]:
     }
 
 
-def _active_ticket_list(query_text: str) -> list[Any]:
+def _dashboard_query_filters(query_text: str) -> dict[str, object]:
+    """Translate dashboard language into ServiceNow-field filters.
+
+    The parser intentionally recognises field concepts and ordinary synonyms,
+    not a finite set of canned questions. Every result is then evaluated over
+    the canonical ticket repository, so Dashboard, Stats, and Chat retain one
+    source of truth.
+    """
+
+    query = query_text.casefold()
+    record_types: set[str] = set()
+    if re.search(r"\b(?:incidents?|inc)\b", query):
+        record_types.add("INC")
+    if re.search(r"\b(?:service requests?|requests?|ritm)\b", query):
+        record_types.add("RITM")
+    if re.search(r"\b(?:problems?|prb)\b", query):
+        record_types.add("PRB")
+    if re.search(r"\b(?:changes?|change requests?|chg)\b", query):
+        record_types.add("CHG")
+
+    explicit_states: set[str] = set()
+    state_patterns = {
+        "New": r"\bnew\b",
+        "In Progress": r"\bin[ -]?progress\b",
+        "On Hold": r"\bon[ -]?hold\b|\bawaiting\b",
+        "Resolved": r"\bresolved\b",
+        "Closed": r"\bclosed\b|\bcomplete(?:d)?\b",
+        "Root Cause Analysis": r"\b(?:root cause analysis|rca)\b",
+        "Implement": r"\bimplement(?:ing|ation)?\b",
+        "Assess": r"\basses(?:s|sing|ment)\b",
+        "Authorize": r"\bauthori[sz](?:e|ed|ation)\b",
+        "Scheduled": r"\bscheduled?\b",
+        "Review": r"\breview\b",
+    }
+    for state, pattern in state_patterns.items():
+        if re.search(pattern, query):
+            explicit_states.add(state)
+
+    hold_reasons: set[str] = set()
+    hold_patterns = {
+        "Awaiting Caller": r"\bawaiting\s+(?:caller|customer|user)\b",
+        "Awaiting Change": r"\bawaiting\s+(?:change|cr)\b",
+        "Awaiting Child": r"\bawaiting\s+child\b",
+        "Awaiting Vendor": r"\bawaiting\s+vendor\b",
+        "Awaiting Problem": r"\bawaiting\s+(?:problem|prb)\b",
+        "Awaiting Parent": r"\bawaiting\s+parent\b",
+    }
+    for reason, pattern in hold_patterns.items():
+        if re.search(pattern, query):
+            hold_reasons.add(reason)
+
+    priority_ranks = {
+        int(match)
+        for match in re.findall(r"\bp\s*([1-4])\b|\b([1-4])\s*[- ]\s*(?:critical|high|moderate|low)\b", query)
+        for match in match
+        if match
+    }
+    if re.search(r"\bcritical\b", query):
+        priority_ranks.add(1)
+    if re.search(r"\bhigh(?:[- ]priority)?\b", query):
+        priority_ranks.add(2)
+    if re.search(r"\bmoderate\b", query):
+        priority_ranks.add(3)
+    if re.search(r"\blow(?:[- ]priority)?\b", query):
+        priority_ranks.add(4)
+
+    # Negation must win over the generic breached token so "non-breached" is
+    # always an SLA exclusion rather than a breach request.
+    if re.search(r"\b(?:non|not|un)[ -]?breach(?:ed)?\b|\bwithin\s+sla\b|\bmet\s+sla\b", query):
+        sla_mode = "non_breached"
+    elif re.search(r"\bat[ -]?risk\b|\bnear[ -]?breach\b", query):
+        sla_mode = "at_risk"
+    elif re.search(r"\bon[ -]?track\b", query):
+        sla_mode = "on_track"
+    elif re.search(r"\bbreach(?:ed|es)?\b", query):
+        sla_mode = "breached"
+    else:
+        sla_mode = None
+
+    closed_requested = bool(re.search(r"\b(?:closed|resolved|completed|cancel(?:led|ed))\b", query))
+    procedure_language = bool(re.search(r"\b(?:how do i|how to|recover|resolve|troubleshoot|configure|execute|activate)\b", query))
+    # "Queue" can mean either a ServiceNow work queue or a SAP qRFC queue.
+    # Treat it as an active-work signal only in the former, non-procedural
+    # context; this prevents SMQ1/SMQ2 troubleshooting from becoming a ticket
+    # list request.
+    active_requested = bool(re.search(r"\b(?:active|open|ongoing|current|backlog)\b", query)) or ("queue" in query and not procedure_language)
+    requires_active = bool(sla_mode or hold_reasons or active_requested) and not closed_requested
+    return {
+        "modules": _requested_sap_modules(query_text),
+        "groups": _mentioned_assignment_groups(query_text),
+        "assignees": _mentioned_assignees(query_text),
+        "record_types": record_types,
+        "states": explicit_states,
+        "hold_reasons": hold_reasons,
+        "priority_ranks": priority_ranks,
+        "sla_mode": sla_mode,
+        "requires_active": requires_active,
+        "asks_for_count": bool(re.search(r"\b(?:how many|count|number of|total)\b", query)),
+        "asks_for_details": bool(re.search(r"\b(?:show|list|which|details?|queue|records?)\b", query)),
+    }
+
+
+def _ticket_priority_rank(ticket: Any) -> int:
+    match = re.search(r"\b([1-4])\b", str(ticket.priority))
+    if match:
+        return int(match.group(1))
+    return {"P1": 1, "P2": 2, "P3": 3, "P4": 4}.get(str(ticket.priority).upper(), 9)
+
+
+def _is_at_risk(ticket: Any) -> bool:
+    return (
+        ticket.type in {"INC", "RITM"}
+        and not (ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0))
+        and (str(ticket.sla_status).upper() == "AT_RISK" or (ticket.sla_time_remaining is not None and 0 < ticket.sla_time_remaining <= 90))
+    )
+
+
+def _dashboard_filtered_tickets(query_text: str) -> tuple[list[Any], dict[str, object]]:
+    """Apply reusable ServiceNow field filters directly to canonical records."""
+
+    filters = _dashboard_query_filters(query_text)
+    tickets = list(central_ticket_records().values())
     closed_states = {"Resolved", "Closed", "Closed Complete", "Closed Incomplete", "Closed Skipped", "Canceled"}
-    requested_modules = _requested_sap_modules(query_text)
-    tickets = [ticket for ticket in central_ticket_records().values() if ticket.state not in closed_states]
-    if requested_modules:
-        tickets = [ticket for ticket in tickets if requested_modules.intersection(ticket.sap_modules)]
+    modules = set(filters["modules"])
+    groups = set(filters["groups"])
+    assignees = set(filters["assignees"])
+    record_types = set(filters["record_types"])
+    states = set(filters["states"])
+    hold_reasons = set(filters["hold_reasons"])
+    priority_ranks = set(filters["priority_ranks"])
+    sla_mode = filters["sla_mode"]
+
+    if modules:
+        tickets = [ticket for ticket in tickets if modules.intersection(ticket.sap_modules)]
+    if groups:
+        tickets = [ticket for ticket in tickets if ticket.assignment_group in groups]
+    if assignees:
+        tickets = [ticket for ticket in tickets if ticket.assigned_to in assignees]
+    if record_types:
+        tickets = [ticket for ticket in tickets if ticket.type in record_types]
+    if states:
+        tickets = [ticket for ticket in tickets if ticket.state in states]
+    if hold_reasons:
+        tickets = [ticket for ticket in tickets if ticket.hold_reason in hold_reasons]
+    if priority_ranks:
+        tickets = [ticket for ticket in tickets if _ticket_priority_rank(ticket) in priority_ranks]
+    if filters["requires_active"]:
+        tickets = [ticket for ticket in tickets if ticket.state not in closed_states]
+    if sla_mode:
+        # SLA status is defined only for incidents and requests. Problems and
+        # changes are deliberately excluded instead of being mislabelled as
+        # non-breached work.
+        tickets = [ticket for ticket in tickets if ticket.type in {"INC", "RITM"}]
+        if sla_mode == "breached":
+            tickets = [ticket for ticket in tickets if ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0)]
+        elif sla_mode == "non_breached":
+            tickets = [ticket for ticket in tickets if not ticket.is_breached and (ticket.sla_time_remaining is None or ticket.sla_time_remaining > 0)]
+        elif sla_mode == "at_risk":
+            tickets = [ticket for ticket in tickets if _is_at_risk(ticket)]
+        elif sla_mode == "on_track":
+            tickets = [ticket for ticket in tickets if not _is_at_risk(ticket) and not ticket.is_breached and str(ticket.sla_status).upper() == "ON_TRACK"]
+    tickets.sort(key=lambda ticket: (_ticket_priority_rank(ticket), ticket.sla_time_remaining if ticket.sla_time_remaining is not None else 10**9, ticket.number))
+    return tickets, filters
+
+
+def _is_dashboard_filter_request(query_text: str) -> bool:
+    """Decide whether a question asks for a filtered operational queue."""
+
+    query = query_text.casefold()
+    filters = _dashboard_query_filters(query_text)
+    procedural = bool(re.search(r"\b(?:how do i|how to|create|configure|explain|steps?|guide|process|workflow|procedure|approval)\b", query))
+    record_signal = bool(re.search(r"\b(?:tickets?|incidents?|requests?|problems?|changes?|queue|work items?|records?)\b", query))
+    quantifier = bool(filters["asks_for_count"])
+    applied_filter = any((
+        filters["modules"], filters["groups"], filters["assignees"], filters["record_types"], filters["states"],
+        filters["hold_reasons"], filters["priority_ranks"], filters["sla_mode"], filters["requires_active"],
+    ))
+    return applied_filter and (record_signal or quantifier) and not (procedural and not (quantifier or filters["asks_for_details"]))
+
+
+def _dashboard_filter_label(filters: dict[str, object]) -> str:
+    """Create a transparent human label from the active canonical filters."""
+
+    parts: list[str] = []
+    sla_label = {
+        "breached": "SLA-breached",
+        "non_breached": "non-breached SLA-tracked",
+        "at_risk": "SLA at-risk",
+        "on_track": "SLA on-track",
+    }.get(str(filters["sla_mode"]), "")
+    if sla_label:
+        parts.append(sla_label)
+    if filters["priority_ranks"]:
+        parts.append(" / ".join(f"P{rank}" for rank in sorted(filters["priority_ranks"])))
+    if filters["states"]:
+        parts.append(" / ".join(sorted(filters["states"])))
+    if filters["hold_reasons"]:
+        parts.append(" / ".join(sorted(filters["hold_reasons"])))
+    if filters["record_types"]:
+        parts.append(" / ".join(sorted(filters["record_types"])))
+    if filters["modules"]:
+        parts.append(" / ".join(sorted(filters["modules"])))
+    if filters["groups"]:
+        parts.append(" / ".join(sorted(filters["groups"])))
+    if filters["assignees"]:
+        parts.append(" / ".join(sorted(filters["assignees"])))
+    return " ".join(parts) or "Canonical ServiceNow"
+
+
+def _dashboard_filtered_answer(query_text: str) -> tuple[str, list[str]]:
+    """Answer any canonical dashboard filter combination without canned data."""
+
+    tickets, filters = _dashboard_filtered_tickets(query_text)
+    label = _dashboard_filter_label(filters)
+    active_qualifier = " active" if filters["requires_active"] else ""
+    if not tickets:
+        return f"I found no{active_qualifier} {label} records in the canonical ServiceNow repository.", []
+    noun = "record" if len(tickets) == 1 else "records"
+    lines = [f"{label} {noun.title()} ({len(tickets)})", "", f"I found {len(tickets)}{active_qualifier} {label} {noun.lower()} using the live ServiceNow fields."]
+    if filters["asks_for_count"] and not filters["asks_for_details"]:
+        lines.extend(["", "Matching records", *[f"{ticket.number} — {ticket.short_description} ({ticket.state})" for ticket in tickets]])
+    else:
+        lines.extend(["", "Queue details"])
+        for index, ticket in enumerate(tickets, start=1):
+            lines.extend(_ticket_detail_block(ticket, index))
+            lines.append("")
+    return "\n".join(lines), [ticket.number for ticket in tickets]
+
+
+def _active_ticket_list(query_text: str) -> list[Any]:
+    tickets, _ = _dashboard_filtered_tickets(f"{query_text} active")
     priority_rank = {"1 - Critical": 1, "2 - High": 2, "3 - Moderate": 3, "4 - Low": 4}
     return sorted(tickets, key=lambda ticket: (priority_rank.get(ticket.priority, 9), ticket.number))
 
@@ -714,18 +990,68 @@ def _is_goods_receipt_question(query_text: str) -> bool:
     )
 
 
+def _is_broad_goods_receipt_overview(query_text: str) -> bool:
+    """Limit the curated LEAP overview to deliberately broad workflow asks.
+
+    A mention of a Goods Receipt transaction is not, by itself, a reason to
+    hide a concrete error runbook behind the generic five-step overview.
+    """
+
+    query = query_text.casefold()
+    return _is_goods_receipt_question(query_text) and bool(
+        re.search(r"\b(?:explain|overview|process|workflow|walk\s+me\s+through|describe)\b", query)
+    ) and not _has_specific_troubleshooting_signal(query_text)
+
+
+def _has_specific_troubleshooting_signal(query_text: str) -> bool:
+    """Identify a request that must be answered from retrieved runbook evidence.
+
+    These are field signatures and SAP transactions, not a list of canned
+    questions.  They deliberately sit above broad process templates so the
+    knowledge corpus remains the authority for an actual failure.
+    """
+
+    query = query_text.casefold()
+    if re.search(
+        r"(?:\bqa\s*0*07\b|\bm8\s*147\b|\bm7\s*0*42\b|/scwm/delivery\s*0*03\b|"
+        r"\bcc0*32\b|\bqie_insp_doc\s*0*12\b|\bsysfail\b|\bmsc[23]n\b|\bobyc\b|"
+        r"\bstms_import\b|\bcs02\b|\bcv0?[12]n\b|\bcc0?[12]\b)",
+        query,
+    ):
+        return True
+    return bool(re.search(r"\b(?:how\s+to\s+(?:resolve|fix)|how\s+(?:do|can|should)\s+.*(?:resolve|fix)|error|failed|blocked)\b", query))
+
+
 def _is_integration_change_question(query_text: str) -> bool:
     query = query_text.casefold()
     return "change" in query and any(term in query for term in ("interface", "integration", "middleware", "api"))
 
 
+def _is_servicenow_change_management_question(query_text: str) -> bool:
+    """Recognise procedural Change Management questions, not CHG queue asks."""
+
+    query = query_text.casefold()
+    discusses_change = bool(re.search(r"\b(?:change management|change request|normal change|authorization change|ctask|c task)\b", query))
+    procedure_signal = bool(re.search(r"\b(?:how|create|process|workflow|steps?|approval|assessment|testing|alm|close)\b", query))
+    return discusses_change and procedure_signal
+
+
 def _procedure_title(query_text: str, chunks: list[dict[str, object]]) -> str:
     """Choose a human-readable heading from the resolved knowledge context."""
 
-    if _is_goods_receipt_question(query_text):
+    if _is_broad_goods_receipt_overview(query_text):
         return "LEAP SAP EWM Goods Receipt"
     if _is_integration_change_question(query_text):
         return "Production SAP Interface Change Control"
+    if _is_servicenow_change_management_question(query_text):
+        return "ServiceNow GxP Change Management"
+    query = query_text.casefold()
+    if any(term in query for term in ("smq1", "smq2", "sysfail", "stms", "transport", "basis")):
+        return "SAP BASIS Queue and Transport Operations"
+    if any(term in query for term in ("migo", "qa 007", "m7 042", "msc2n", "purchase order")):
+        return "SAP MM Goods Movement and Batch Status Recovery"
+    if any(term in query for term in ("cc032", "aennr", "change master", "cc01", "cc02", "bom", "document info")):
+        return "SAP PLM Engineering Change Master Control"
     for chunk in chunks:
         if chunk.get("record_type") == "knowledge" and chunk.get("title"):
             return str(chunk["title"])
@@ -761,6 +1087,16 @@ def _topic_action_items(query_text: str) -> list[str] | None:
     """Return concise local guidance for the high-value SAP support domains."""
 
     query = query_text.casefold()
+    # Error signatures and explicit troubleshooting always use the vector
+    # retrieved source.  Do not let a generic SOP template override the
+    # evidence that explains the particular failure.
+    if _has_specific_troubleshooting_signal(query_text):
+        return None
+    # Change compliance questions are grounded in the Veeva source rather
+    # than a static summarisation.  This also prevents them from falling into
+    # an operational CHG list route.
+    if _is_servicenow_change_management_question(query_text):
+        return None
     if _is_integration_change_question(query_text):
         return [
             "Confirm the affected interface, source and target systems, business impact, approved Change Request, implementation owner, and rollback owner.",
@@ -769,7 +1105,7 @@ def _topic_action_items(query_text: str) -> list[str] | None:
             "Implement only in the approved window. Monitor message processing, error queues, downstream record creation, and business validation during the change.",
             "Validate the end-to-end outcome with the business owner, record the evidence and residual risk in the Change Request, then close or roll back using the approved decision path.",
         ]
-    if _is_goods_receipt_question(query_text):
+    if _is_broad_goods_receipt_overview(query_text):
         return [
             "Open and validate the inbound delivery in /SCWM/PRDI. Physically check the delivered quantity, review temperature requirements, and deconsolidate material by the required temperature zone.",
             "Create and label the Handling Units using the approved packaging specification. Keep only the permitted material type in each HU and retain the delivery evidence.",
@@ -801,7 +1137,14 @@ def _topic_action_items(query_text: str) -> list[str] | None:
             "Use ZL84_REQ_ORDE for the order header, ZL84_REQ_REQUEST for the request line, and ZL84_REQ_WHT to map the warehouse task back to the Request ID.",
             "Review the Request Monitor state: O, P, S, and C progress only forward. A secondary level item can stage or close automatically, and a closed request cannot be cancelled.",
         ]
-    if any(term in query for term in ("disposal", "dispose", "scrap", "scrapping", "retained sample", "expired material", "prt0-scrap", "scrap-zone", "movement type 551", "migo", "scwm/prdo", "zz1_disposal_days")):
+    if any(term in query for term in ("qa 007", "m7 042", "restricted batch", "expired sled", "batch status", "msc2n", "movement type 101")):
+        return [
+            "Confirm that the purchase order is released in ME29N, then review the material, vendor batch, date of manufacture, and shelf-life expiration date entered in MIGO.",
+            "For QA 007, obtain the Quality decision before changing the restricted batch. Update MSC2N to Unrestricted only when QA has approved release.",
+            "For M7 042 or an expired SLED, verify the threshold and correct the Date of Manufacture on the MIGO Batch tab where it was entered incorrectly.",
+            "Repost the goods receipt and retain the PO, QA decision, batch-status evidence, shelf-life values, and material-document outcome for auditability.",
+        ]
+    if any(term in query for term in ("disposal", "dispose", "scrap", "scrapping", "retained sample", "expired material", "prt0-scrap", "scrap-zone", "movement type 551", "scwm/prdo", "zz1_disposal_days")):
         return [
             "Confirm the disposal date from the batch expiration date plus ZZ1_DISPOSAL_DAYS in MAT1 Warehouse Data, then review the Disposal Overview in Warehouse Management Monitor.",
             "Initiate the financial goods issue in ERP with MIGO using movement type 551 and the correct material and quantity. This should create the scrapping outbound delivery in EWM.",
@@ -826,6 +1169,14 @@ def _topic_action_items(query_text: str) -> list[str] | None:
             "Move the plan and run through the controlled review and approval states; create a test set early if needed, but do not create a test run until the test plan is approved.",
             "After approval, update the related Change Request and close its testing task with the completed evidence and approvals.",
         ]
+    if any(term in query for term in ("cc032", "change master", "aennr", "release key", "cc01", "cc02")):
+        return [
+            "Capture the Change Number AENNR, current release key, Valid-From date, error CC032, and any active-user evidence before changing the Engineering Change Master.",
+            "Confirm whether the maintenance is blocked because the Valid-From date has not been reached, the Release Key remains Draft, or another user owns an exclusive session.",
+            "For a confirmed stale user lock, obtain the required approval and have the Basis owner remove it in SM12. Do not clear an active change-maintenance lock.",
+            "Open CC02 and set the Release Key only when the controlled approval route permits changes; adjust Valid-From only through approved engineering change control.",
+            "Validate the controlled object change in CS02 or CV02N using the AENNR and retain the error, approval, release state, and post-change evidence.",
+        ]
     if "plm" in query or any(term in query for term in ("recipe", "classification", "design bom")):
         return [
             "Confirm the affected recipe, specification, design BOM, material, approval step, and business release impact.",
@@ -834,7 +1185,23 @@ def _topic_action_items(query_text: str) -> list[str] | None:
             "Use approved change control before restarting a regulated workflow or deploying a mapping correction.",
             "Validate the correction in QA, then confirm the approval trail, classification result, and downstream planning outcome.",
         ]
-    if "basis" in query or any(term in query for term in ("sm37", "transport", "stms", "spool", "gateway", "certificate", "su53")):
+    if any(term in query for term in ("smq1", "smq2", "sysfail", "activate queue", "reset status")):
+        return [
+            "Capture the SMQ1 or SMQ2 queue name, LUW error, destination, retry history, and any ST22 short dump before changing the queue state.",
+            "Determine whether the SYSFAIL is caused by destination or network availability, a locked database object, or an uncaught ABAP dump. Resolve the underlying cause before retrying.",
+            "If a confirmed stale lock is the blocker, verify ownership and data-integrity risk before the approved Basis owner uses SM12. Do not remove an active business lock.",
+            "Use Debug Queue only when diagnosis requires it; then Reset Status and Activate Queue in SMQ1 or SMQ2. Confirm that the queue returns to RUNNING.",
+            "Validate the downstream business outcome and record queue evidence, approvals, retry result, and any residual risk in the linked ServiceNow record.",
+        ]
+    if any(term in query for term in ("stms", "transport management", "transport request", "transport import", "tms promotion")):
+        return [
+            "Create or review the Workbench or Customizing transport in SE09 or SE10 and confirm the GxP naming standard, impacted objects, code-inspector checks, and unit-test evidence.",
+            "Release underlying tasks first and then the main Transport Request. Preserve the release status and quality-gate evidence before promotion.",
+            "Use STMS_IMPORT to select the RBS010 quality or testing queue, choose the approved transport, and apply the documented import options.",
+            "Promote to RBS020 production only in the scheduled maintenance window after the formal Quality Lead sign-off and approved change record are in place.",
+            "Validate the imported object, business process, and relevant integration after the import; record the transport return code, approver decision, and validation result in ServiceNow.",
+        ]
+    if "basis" in query or any(term in query for term in ("sm37", "transport", "stms", "spool", "gateway", "certificate", "su53", "smq1", "smq2", "sysfail", "st22", "sm12")):
         return [
             "Capture the job log, dump, transport return code, gateway evidence, or authorization trace before changing the technical state.",
             "Confirm whether the impact is isolated to a user, device, node, client, or target system.",
@@ -881,7 +1248,9 @@ def _retrieved_knowledge_answer(query_text: str, chunks: list[dict[str, object]]
         _, first_index, _ = ranked[0]
         # Preserve the source's procedural sequence after the best-matching
         # sentence instead of assembling unrelated high-scoring fragments.
-        matched = sentences[first_index:first_index + 3]
+        # Four adjacent sentences retain a complete diagnostic and remediation
+        # sequence without turning the response into an article dump.
+        matched = sentences[first_index:first_index + 4]
         if matched and (best is None or ranked[0][0] > best[0]):
             best = (ranked[0][0], str(chunk.get("title", "internal procedure")), matched)
     if not best:
@@ -897,7 +1266,11 @@ def _has_authoritative_playbook(query_text: str) -> bool:
     never replace a precise, validated LEAP procedure with a weaker paraphrase.
     """
 
-    return _is_ewm_queue_lock_question(query_text) or _topic_action_items(query_text) is not None
+    return (
+        _has_specific_troubleshooting_signal(query_text)
+        or _is_ewm_queue_lock_question(query_text)
+        or _topic_action_items(query_text) is not None
+    )
 
 
 def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
@@ -906,6 +1279,14 @@ def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
             "I could not find a matching live ticket, calculated metric, or approved enterprise document for that question. "
             "Try a ticket number, an assignee or assignment-group name, or a specific SAP process such as EWM goods receipt, Request Hub, or HP ALM testing."
         )
+
+    # Error-code and troubleshooting requests are the highest priority. They
+    # must be sourced from vector-retrieved SUD content, not from a generic
+    # queue or goods-receipt template.
+    if _has_specific_troubleshooting_signal(query_text):
+        knowledge_answer = _retrieved_knowledge_answer(query_text, chunks)
+        if knowledge_answer:
+            return knowledge_answer
 
     if _is_how_to_question(query_text) and _is_ewm_queue_lock_question(query_text):
         return (
@@ -980,7 +1361,7 @@ def _sources(chunks: list[dict[str, object]]) -> list[dict[str, object]]:
     return sources
 
 
-def _add_natural_source_attribution(answer: str, chunks: list[dict[str, object]]) -> str:
+def _add_natural_source_attribution(answer: str, chunks: list[dict[str, object]], query_text: str) -> str:
     """Keep source lineage visible in prose without adding UI cards or raw IDs."""
 
     knowledge_chunks = [chunk for chunk in chunks if chunk.get("record_type") == "knowledge"]
@@ -991,20 +1372,18 @@ def _add_natural_source_attribution(answer: str, chunks: list[dict[str, object]]
     if knowledge_chunks:
         # Deterministic procedure routes can be more precise than the first
         # vector hit. Select the matching canonical title for the citation.
+        query = query_text.casefold()
+        title_hint = (
+            "goods receipt" if _is_goods_receipt_question(query_text)
+            else "transport management" if any(term in query for term in ("stms", "transport", "tms"))
+            else "engineering change" if any(term in query for term in ("cc032", "aennr", "change master", "cc01", "cc02"))
+            else "procurement goods" if any(term in query for term in ("migo", "qa 007", "m7 042", "msc2n"))
+            else "change management" if _is_servicenow_change_management_question(query_text)
+            else ""
+        )
         chunk = next(
-            (
-                candidate for candidate in knowledge_chunks
-                if _is_goods_receipt_question(answer)
-                and "goods receipt" in str(candidate.get("title", "")).casefold()
-            ),
-            next(
-                (
-                    candidate for candidate in knowledge_chunks
-                    if _is_integration_change_question(answer)
-                    and "change control for sap interface" in str(candidate.get("title", "")).casefold()
-                ),
-                knowledge_chunks[0],
-            ),
+            (candidate for candidate in knowledge_chunks if title_hint and title_hint in str(candidate.get("title", "")).casefold()),
+            knowledge_chunks[0],
         )
         title = str(chunk.get("title", "")).strip()
         system = str(chunk.get("system", "enterprise knowledge base")).strip()
@@ -1020,10 +1399,12 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     chunks = retrieve_vector_context(query_text)
     has_internal_match = bool(chunks)
     prompt = _grounded_prompt(query_text, chunks) if has_internal_match else _fallback_prompt(query_text)
-    ticket_list_intent = is_active_ticket_list_request(query_text)
+    knowledge_procedure_intent = _is_knowledge_procedure_request(query_text)
+    ticket_list_intent = not knowledge_procedure_intent and is_active_ticket_list_request(query_text)
     listed_ticket_ids: list[str] = []
     assignees = _mentioned_assignees(query_text)
     groups = _mentioned_assignment_groups(query_text)
+    sla_health_request = _is_sla_health_question(query_text)
     operational_scope_intent = False
     chart_data: dict[str, object] | None = None
     stats_context: str | None = None
@@ -1032,27 +1413,68 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     # A module-specific queue question is a scoped operational lookup.  Keep
     # it on the list path even when phrased as "how many", so the response
     # provides both the truthful count and the records behind that count.
-    module_queue_intent = bool(_requested_sap_modules(query_text)) and bool(
+    module_queue_intent = not knowledge_procedure_intent and bool(_requested_sap_modules(query_text)) and bool(
         re.search(r"\b(tickets?|incidents?|queue|work items?)\b", query_text.casefold())
     )
     # A module queue request (for example, "how many PLM tickets are in the
     # queue") is handled by the ticket-list path so it returns the actual
     # matching work items rather than unrelated global metrics.
     breach_list_intent = _is_breached_ticket_list_request(query_text, history)
+    dashboard_filters = _dashboard_query_filters(query_text)
+    # A dashboard-level SLA health question is the explicit executive-chart
+    # request. Other broad knowledge or general metric questions stay text
+    # only unless a named group or assignee asks for SLA health or at-risk work.
+    dashboard_sla_chart_intent = (
+        not knowledge_procedure_intent
+        and sla_health_request
+        and "dashboard" in query_text.casefold()
+    )
+    scoped_health_visual_intent = (
+        not knowledge_procedure_intent
+        and (
+            (bool(assignees or groups) and (sla_health_request or str(dashboard_filters["sla_mode"]) == "at_risk"))
+            or dashboard_sla_chart_intent
+        )
+    )
+    has_refining_filter = any((
+        dashboard_filters["sla_mode"], dashboard_filters["record_types"], dashboard_filters["states"],
+        dashboard_filters["hold_reasons"], dashboard_filters["priority_ranks"],
+    ))
+    # Preserve the richer existing assignee and group workload briefs for a
+    # simple person/team lookup. A second natural-language filter such as
+    # "at-risk", "P1", or "Awaiting Vendor" routes through the reusable
+    # canonical field filter instead.
+    dashboard_filter_intent = not scoped_health_visual_intent and not knowledge_procedure_intent and _is_dashboard_filter_request(query_text) and (
+        not (assignees or groups) or has_refining_filter
+    )
     stats_intent = (
         _is_metrics_intent(query_text)
         and direct_ticket is None
         and not ticket_list_intent
         and not module_queue_intent
         and not breach_list_intent
+        and not dashboard_filter_intent
+        and not knowledge_procedure_intent
         and not assignees
         and not groups
     )
+    live_metric_intent = stats_intent or scoped_health_visual_intent
     if direct_ticket is not None:
         answer = _ticket_answer(direct_ticket)
         listed_ticket_ids = [direct_ticket.number]
         operational_scope_intent = True
         intent = "direct_ticket"
+    elif scoped_health_visual_intent:
+        live_stats = _live_stats_snapshot(query_text, active_only=True)
+        stats_context = _stats_context_block(live_stats)
+        answer, listed_ticket_ids = _stats_answer(query_text, live_stats, stats_context)
+        chart_data = _stats_chart_payload(live_stats)
+        operational_scope_intent = True
+        intent = "scoped_sla_health"
+    elif dashboard_filter_intent:
+        answer, listed_ticket_ids = _dashboard_filtered_answer(query_text)
+        operational_scope_intent = True
+        intent = "dashboard_filtered_list"
     elif breach_list_intent:
         answer, listed_ticket_ids = _breached_ticket_list_answer(query_text)
         operational_scope_intent = True
@@ -1061,27 +1483,18 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
         assignee = assignees[0]
         scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assigned_to == assignee]
         answer, listed_ticket_ids = _workload_answer(assignee, scoped_tickets)
-        if _is_metrics_intent(query_text):
-            live_stats = _live_stats_snapshot(query_text)
-            stats_context = _stats_context_block(live_stats)
-            chart_data = _stats_chart_payload(live_stats)
-        operational_scope_intent = True
         intent = "assignee_workload"
+        operational_scope_intent = True
     elif groups:
         group = groups[0]
         scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assignment_group == group]
         answer, listed_ticket_ids = _workload_answer(group, scoped_tickets)
-        if _is_metrics_intent(query_text):
-            live_stats = _live_stats_snapshot(query_text)
-            stats_context = _stats_context_block(live_stats)
-            chart_data = _stats_chart_payload(live_stats)
-        operational_scope_intent = True
         intent = "assignment_group_workload"
+        operational_scope_intent = True
     elif stats_intent:
-        live_stats = _live_stats_snapshot(query_text)
+        live_stats = _live_stats_snapshot(query_text, active_only=sla_health_request)
         stats_context = _stats_context_block(live_stats)
         answer, listed_ticket_ids = _stats_answer(query_text, live_stats, stats_context)
-        chart_data = _stats_chart_payload(live_stats)
         operational_scope_intent = True
         intent = "live_stats"
     elif ticket_list_intent or module_queue_intent:
@@ -1090,7 +1503,12 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     else:
         answer = _local_answer(query_text, chunks)
         intent = "conversational_guidance"
-    model_used = "live-stats-deterministic" if stats_intent else "canonical-ticket-deterministic" if direct_ticket is not None else "local-grounded-fallback"
+    model_used = (
+        "live-stats-deterministic" if live_metric_intent
+        else "live-dashboard-filter-deterministic" if dashboard_filter_intent
+        else "canonical-ticket-deterministic" if direct_ticket is not None
+        else "local-grounded-fallback"
+    )
     if gemini_client is not None and not ticket_list_intent and not operational_scope_intent:
         try:
             generated = gemini_client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
@@ -1104,7 +1522,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
             answer = local_answer
             model_used = f"local:{LOCAL_OPEN_SOURCE_GENERATOR.model_id}"
     if has_internal_match and not ticket_list_intent and not operational_scope_intent:
-        answer = _add_natural_source_attribution(answer, chunks)
+        answer = _add_natural_source_attribution(answer, chunks, query_text)
     ticket_ids = []
     for chunk in chunks:
         ticket_id = str(chunk.get("ticket_id") or chunk.get("ticket_number") or "").upper()
@@ -1117,7 +1535,7 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
         "answer": answer, "sources": _sources(chunks), "model_used": model_used,
         "embedding_model": VECTOR_STORE.status()["embedding_model"],
         "fallback_reasoning": not has_internal_match and not operational_scope_intent,
-        "retrieval_route": "live_stats" if stats_intent else "canonical_ticket" if direct_ticket is not None else "vector_grounded_rag" if has_internal_match else "gemini_itil_reasoning",
+        "retrieval_route": "live_stats" if live_metric_intent else "canonical_dashboard_filter" if dashboard_filter_intent else "canonical_ticket" if direct_ticket is not None else "vector_grounded_rag" if has_internal_match else "gemini_itil_reasoning",
         "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
         "ticket_ids": ticket_ids,
         "intent": intent,
