@@ -33,6 +33,10 @@ class ChatQuery(BaseModel):
     message: str = Field(min_length=1, max_length=2_000)
     ticket_id: str | None = None
     action: Literal["chat", "generate_cr", "generate_rca"] = "chat"
+    # The browser supplies a short, read-only transcript window so follow-up
+    # questions such as "which are these breached tickets?" retain context.
+    # Nothing is persisted and the canonical repository remains unchanged.
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=12)
 
 
 def classify_breach_reason(ticket: Ticket) -> str:
@@ -585,10 +589,23 @@ def list_dashboard_tickets(assignee: str | None = None, assignment_group: str | 
 
 
 @app.get("/api/dashboard/assignment-groups")
-def list_assignment_groups() -> dict[str, list[str]]:
-    """Return the enterprise assignment-group catalog used by queue filters."""
+def list_assignment_groups() -> dict[str, object]:
+    """Return the canonical group catalog and live review defaults.
 
-    return {"assignment_groups": ALL_ASSIGNMENT_GROUPS}
+    The browser never owns an operational group list. These values are derived
+    from the canonical ServiceNow-shaped ticket repository at request time.
+    """
+
+    tickets = list(central_ticket_records().values())
+    groups = sorted({ticket.assignment_group for ticket in tickets} | set(ALL_ASSIGNMENT_GROUPS))
+    closed_states = {"Closed", "Resolved", "Closed Complete", "Closed Incomplete", "Closed Skipped", "Canceled"}
+    active_counts = Counter(ticket.assignment_group for ticket in tickets if ticket.state not in closed_states)
+    my_team_groups = sorted(groups, key=lambda group: (-active_counts[group], group))[:3]
+    return {
+        "assignment_groups": groups,
+        "default_my_team_groups": my_team_groups,
+        "available_assignees": sorted({ticket.assigned_to for ticket in tickets if ticket.assigned_to}),
+    }
 
 
 def _month_starts(start: date, end: date) -> list[date]:
@@ -608,6 +625,7 @@ def get_dashboard_stats(
     assignment_group: list[str] = Query(default=[]),
     group_filter_active: bool = False,
     assignee: list[str] = Query(default=[]),
+    sap_module: list[str] = Query(default=[]),
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> dict[str, object]:
@@ -623,6 +641,7 @@ def get_dashboard_stats(
         ticket for ticket in central_ticket_records().values()
         if ticket.assignment_group in selected_groups
         and (not assignee or ticket.assigned_to in set(assignee))
+        and (not sap_module or bool(set(ticket.sap_modules).intersection(sap_module)))
         and report_start <= date.fromisoformat(ticket.opened_on) <= report_end
     ]
 
@@ -753,6 +772,7 @@ def get_dashboard_stats(
         "filters": {
             "assignment_groups": sorted(selected_groups),
             "assignees": sorted(assignee),
+            "sap_modules": sorted(sap_module),
             "start_date": report_start.isoformat(),
             "end_date": report_end.isoformat(),
         },
@@ -839,12 +859,13 @@ def get_live_stats(
     assignment_group: list[str] = Query(default=[]),
     group_filter_active: bool = False,
     assignee: list[str] = Query(default=[]),
+    sap_module: list[str] = Query(default=[]),
     start_date: date | None = None,
     end_date: date | None = None,
 ) -> dict[str, object]:
     """Canonical stats alias for integrations outside the dashboard route."""
 
-    return get_dashboard_stats(assignment_group, group_filter_active, assignee, start_date, end_date)
+    return get_dashboard_stats(assignment_group, group_filter_active, assignee, sap_module, start_date, end_date)
 
 
 @app.get("/api/knowledge/sources")
@@ -880,7 +901,7 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         (ticket_id for ticket_id in ticket_db if ticket_id in query_text),
         None,
     )
-    rag_result = query_hybrid_rag(query.message)
+    rag_result = query_hybrid_rag(query.message, query.history)
     ticket_list_intent = rag_result.get("intent") == "active_ticket_list" and not query.ticket_id
     ticket_status_intent = bool(query.ticket_id or found_id or is_ticket_status_request(query.message))
     if ticket_status_intent and not ticket_list_intent:
@@ -893,7 +914,13 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
     else:
         found_id = None
     rca_intent = "RCA" in query_text or "ROOT CAUSE" in query_text
-    cr_intent = bool(re.search(r"\bCR\b", query_text)) or "CHANGE" in query_text
+    # A normal question about a production change must remain a conversational
+    # RAG question. Only an explicit request (or the existing quick action)
+    # enters the CR-drafting workflow.
+    cr_intent = bool(re.search(
+        r"\b(?:generate|create|draft|write)\s+(?:a\s+)?(?:cr|change request)\b",
+        query_text,
+    ))
 
     if query.action == "generate_rca" or rca_intent:
         action = "generate_rca"

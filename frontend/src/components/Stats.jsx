@@ -1,8 +1,6 @@
 import { useEffect, useState } from 'react'
 import { fetchDashboardStats } from '../api'
 
-const reportEnd = '2026-10-06'
-const reportStart = '2026-07-01'
 const trendColors = ['#38bdf8', '#34d399', '#fbbf24', '#a78bfa', '#fb7185', '#22d3ee']
 
 function ChartTooltip({ tooltip }) {
@@ -106,8 +104,8 @@ export default function Stats({ onDrilldown }) {
   // null means “all groups”; it avoids storing an unnecessary duplicate of
   // the backend group catalog before the first response arrives.
   const [selectedGroups, setSelectedGroups] = useState(null)
-  const [startDate, setStartDate] = useState(reportStart)
-  const [endDate, setEndDate] = useState(reportEnd)
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [groupMenuOpen, setGroupMenuOpen] = useState(false)
@@ -118,6 +116,10 @@ export default function Stats({ onDrilldown }) {
       .then((result) => {
         if (!active) return
         setStats(result)
+        // Reporting dates are provided by the canonical backend catalog; the
+        // client only displays and refines the returned operational window.
+        setStartDate((current) => current || result.filters.start_date)
+        setEndDate((current) => current || result.filters.end_date)
       })
       .catch((requestError) => active && setError(requestError.message))
       .finally(() => active && setLoading(false))

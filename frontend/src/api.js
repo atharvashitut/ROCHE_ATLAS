@@ -36,9 +36,9 @@ export async function fetchTicket(ticketId) {
   return request(`/tickets/${encodeURIComponent(ticketId)}`)
 }
 
-export async function queryCopilot({ message, ticketId, action = 'chat' }) {
+export async function queryCopilot({ message, ticketId, action = 'chat', history = [] }) {
   return request('/chat/query', {
     method: 'POST',
-    body: JSON.stringify({ message, ticket_id: ticketId || undefined, action }),
+    body: JSON.stringify({ message, ticket_id: ticketId || undefined, action, history }),
   })
 }

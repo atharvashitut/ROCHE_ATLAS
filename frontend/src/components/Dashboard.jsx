@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { fetchAssignmentGroups, fetchDashboardStats, fetchDashboardTickets, fetchTicket } from '../api'
 import TicketCard from './TicketCard'
 
-const MY_TEAM_GROUPS = ['SAP EWM Support', 'Integration Middleware', 'QMS Compliance Ops']
 const typeTabs = [
   { id: 'ALL', label: 'All Items' },
   { id: 'INC', label: 'Incidents (INC)' },
@@ -16,10 +15,6 @@ const healthStyles = {
   GREEN: 'bg-emerald-500/15 text-emerald-200 ring-emerald-400/30',
 }
 const closedTaskStates = new Set(['Closed', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped', 'Canceled'])
-// The canonical mock dataset reports through 2026-10-08. Keeping the stale
-// comparison aligned to that reporting snapshot makes the dashboard stable.
-const operationalReferenceTime = Date.parse('2026-10-08T12:00:00Z')
-
 function pendingTasks(tasks = []) {
   return tasks.filter((task) => !closedTaskStates.has(task.state))
 }
@@ -32,14 +27,21 @@ function latestActivityAt(ticket) {
   return timestamps.length ? Math.max(...timestamps) : null
 }
 
-function problemIsStale(ticket) {
+function operationalReferenceTime(tickets = []) {
+  const timestamps = tickets.flatMap((ticket) => [ticket.opened_on, ...(ticket.comments || []).map((entry) => entry.sys_created_on), ...(ticket.work_notes || []).map((entry) => entry.sys_created_on)])
+    .map((value) => Date.parse(String(value || '').replace(' ', 'T')))
+    .filter(Number.isFinite)
+  return timestamps.length ? Math.max(...timestamps) : Date.now()
+}
+
+function problemIsStale(ticket, referenceTime) {
   if (ticket.type !== 'PRB') return false
   const lastActivity = latestActivityAt(ticket)
-  const olderThanSevenDays = lastActivity !== null && operationalReferenceTime - lastActivity > 7 * 24 * 60 * 60 * 1000
+  const olderThanSevenDays = lastActivity !== null && referenceTime - lastActivity > 7 * 24 * 60 * 60 * 1000
   return olderThanSevenDays || pendingTasks(ticket.ptasks).length > 0
 }
 
-function urgencyRank(ticket) {
+function urgencyRank(ticket, referenceTime) {
   const remaining = slaRemainingMinutes(ticket)
   const breached = ticket.is_breached || (typeof remaining === 'number' && remaining <= 0)
   const nearBreach = typeof remaining === 'number' && remaining > 0 && remaining <= 90
@@ -48,13 +50,13 @@ function urgencyRank(ticket) {
   if (['INC', 'RITM'].includes(ticket.type) && breached) return 1
   if (['INC', 'RITM'].includes(ticket.type) && nearBreach && frustrated) return 2
   if (['INC', 'RITM'].includes(ticket.type) && (nearBreach || frustrated)) return 3
-  if (problemIsStale(ticket)) return 10
+  if (problemIsStale(ticket, referenceTime)) return 10
   if (ticket.type === 'CHG' && pendingTasks(ticket.ctasks).length > 0) return 20
   return 30
 }
 
-function sortByOperationalUrgency(left, right) {
-  const rankDifference = urgencyRank(left) - urgencyRank(right)
+function sortByOperationalUrgency(left, right, referenceTime) {
+  const rankDifference = urgencyRank(left, referenceTime) - urgencyRank(right, referenceTime)
   if (rankDifference) return rankDifference
   const leftRemaining = slaRemainingMinutes(left)
   const rightRemaining = slaRemainingMinutes(right)
@@ -63,10 +65,10 @@ function sortByOperationalUrgency(left, right) {
   return String(left.number || left.id).localeCompare(String(right.number || right.id))
 }
 
-function hasOperationalWarning(tickets = []) {
+function hasOperationalWarning(tickets = [], referenceTime) {
   return tickets.some((ticket) => (
-    urgencyRank(ticket) < 10
-    || problemIsStale(ticket)
+    urgencyRank(ticket, referenceTime) < 10
+    || problemIsStale(ticket, referenceTime)
     || (ticket.type === 'CHG' && pendingTasks(ticket.ctasks).length > 0)
   ))
 }
@@ -96,9 +98,9 @@ function hasDetailFields(ticket) {
   return Boolean(ticket && Array.isArray(ticket.comments) && Array.isArray(ticket.work_notes) && Array.isArray(ticket.knowledge_refs) && Array.isArray(ticket.historical_tickets) && Object.prototype.hasOwnProperty.call(ticket, 'agent_analysis'))
 }
 
-function AssigneeBriefing({ assignee, tickets, analysis, onClose }) {
-  const urgentItems = tickets.filter((ticket) => urgencyRank(ticket) < 10)
-  const staleProblems = tickets.filter(problemIsStale)
+function AssigneeBriefing({ assignee, tickets, analysis, referenceTime, onClose }) {
+  const urgentItems = tickets.filter((ticket) => urgencyRank(ticket, referenceTime) < 10)
+  const staleProblems = tickets.filter((ticket) => problemIsStale(ticket, referenceTime))
   const pendingChanges = tickets.filter((ticket) => ticket.type === 'CHG' && pendingTasks(ticket.ctasks).length > 0)
   const agentFindings = analysis?.findings || []
   const urgentFinding = agentFindings.find((finding) => finding.id === 'assignee-risk-priority')
@@ -107,7 +109,7 @@ function AssigneeBriefing({ assignee, tickets, analysis, onClose }) {
   const ageLabel = (ticket) => {
     const lastActivity = latestActivityAt(ticket)
     if (!lastActivity) return 'No activity timestamp'
-    return `${Math.max(0, Math.floor((operationalReferenceTime - lastActivity) / (24 * 60 * 60 * 1000)))}d since update`
+    return `${Math.max(0, Math.floor((referenceTime - lastActivity) / (24 * 60 * 60 * 1000)))}d since update`
   }
   return <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/75 p-4 backdrop-blur-sm" role="presentation" onMouseDown={onClose}>
     <section role="dialog" aria-modal="true" aria-label={`${assignee} operational briefing`} className="w-full max-w-3xl rounded-2xl border border-cyan-500/35 bg-slate-900 p-6 shadow-2xl shadow-slate-950/70" onMouseDown={(event) => event.stopPropagation()}>
@@ -133,6 +135,7 @@ function AssignmentGroupAnomalyBriefing({ groups, detection, agentAnalysis, onCl
 export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown }) {
   const [tickets, setTickets] = useState([])
   const [assignmentGroups, setAssignmentGroups] = useState([])
+  const [myTeamGroups, setMyTeamGroups] = useState([])
   const [selectedGroups, setSelectedGroups] = useState(() => new Set())
   const [groupSearch, setGroupSearch] = useState('')
   const [groupMenuOpen, setGroupMenuOpen] = useState(false)
@@ -156,6 +159,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
         if (!active) return
         setTickets(ticketResult.tickets)
         setAssignmentGroups(groupResult.assignment_groups)
+        setMyTeamGroups(groupResult.default_my_team_groups || [])
         setSelectedGroups(new Set(groupResult.assignment_groups))
         setSelectedAssignees(new Set(ticketResult.tickets.map((ticket) => ticket.assignee)))
       })
@@ -186,6 +190,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
   const activeGroups = useMemo(() => drilldown ? new Set(drilldown.assignmentGroups || []) : selectedGroups, [drilldown, selectedGroups])
   const activeAssignees = useMemo(() => drilldown ? new Set(drilldown.assignees || []) : selectedAssignees, [drilldown, selectedAssignees])
   const briefingAssigneeName = briefingAssignee?.name || null
+  const referenceTime = useMemo(() => operationalReferenceTime(tickets), [tickets])
   const assigneeFocused = Boolean(briefingAssigneeName) || activeAssignees.size < assignees.length
   const visibleTickets = useMemo(() => {
     const filtered = tickets.filter((ticket) => (
@@ -194,11 +199,11 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
       && activeAssignees.has(ticket.assignee)
       && (!drilldown || drilldownTicketIds.has(ticket.number || ticket.id))
     ))
-    return assigneeFocused ? filtered.sort(sortByOperationalUrgency) : filtered
-  }, [activeGroups, activeAssignees, activeType, assigneeFocused, drilldown, drilldownTicketIds, tickets])
+    return assigneeFocused ? filtered.sort((left, right) => sortByOperationalUrgency(left, right, referenceTime)) : filtered
+  }, [activeGroups, activeAssignees, activeType, assigneeFocused, drilldown, drilldownTicketIds, referenceTime, tickets])
   const briefingTickets = useMemo(() => tickets
     .filter((ticket) => ticket.assignee === briefingAssigneeName && activeGroups.has(ticket.assignment_group))
-    .sort(sortByOperationalUrgency), [activeGroups, briefingAssigneeName, tickets])
+    .sort((left, right) => sortByOperationalUrgency(left, right, referenceTime)), [activeGroups, briefingAssigneeName, referenceTime, tickets])
 
   function showAnomalyBriefing(groups) {
     if (!groups.size) {
@@ -231,7 +236,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
   }
 
   function selectMyTeams() {
-    const groups = new Set(MY_TEAM_GROUPS)
+    const groups = new Set(myTeamGroups)
     setSelectedGroups(groups)
     showAnomalyBriefing(groups)
     setGroupSearch('')
@@ -251,7 +256,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
       const assigneeTickets = tickets.filter((ticket) => ticket.assignee === name && activeGroups.has(ticket.assignment_group))
       // The assignee modal is an intervention warning, not a routine status
       // dialog. A healthy SLA and sentiment workload stays on the queue.
-      if (!hasOperationalWarning(assigneeTickets)) {
+      if (!hasOperationalWarning(assigneeTickets, referenceTime)) {
         setBriefingAssignee(null)
         return
       }
@@ -295,6 +300,6 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
     {assigneeFocused && <p className="mb-4 rounded-xl border border-cyan-500/30 bg-cyan-950/20 px-4 py-3 text-sm text-cyan-100">Assignee urgency order is active: urgent customer incidents, stale problems, pending changes, then regular backlog.</p>}
     {loading && <p className="rounded-xl border border-slate-700 p-6 text-slate-400">Loading active tickets…</p>}{error && <p className="rounded-xl border border-rose-500/40 bg-rose-950/30 p-4 text-rose-200" role="alert">Unable to load tickets: {error}</p>}
     {!loading && !error && <div className="apple-table overflow-x-auto rounded-2xl border border-slate-700 bg-slate-900/70 shadow-2xl shadow-slate-950/30"><table className="min-w-full text-left text-sm"><thead className="border-b border-slate-700 bg-slate-800/70 text-xs uppercase tracking-wider text-slate-400"><tr><th className="px-5 py-4">{assigneeFocused ? 'Ticket · urgency order' : 'Ticket'}</th><th className="px-5 py-4">Health</th><th className="px-5 py-4">Context-aware metrics</th><th className="px-5 py-4">Assignment Group</th><th className="px-5 py-4">Assignee</th><th className="px-5 py-4"><span className="sr-only">Details</span></th></tr></thead><tbody className="divide-y divide-slate-800">{visibleTickets.map((ticket) => <tr key={ticket.id} className="hover:bg-slate-800/60"><td className="px-5 py-4"><p className="font-mono text-xs text-cyan-300">{ticket.id} · {ticket.type}</p><p className="mt-1 font-medium">{ticket.title}</p>{(ticket.type === 'INC' || ticket.type === 'RITM') && <div className="mt-2"><SlaBadge ticket={ticket} /></div>}</td><td className="px-5 py-4"><span className={`rounded-full px-2.5 py-1 text-xs font-bold ring-1 ${healthStyles[ticket.health_color]}`}>{ticket.health_color}</span></td><td className="px-5 py-4"><ContextMetrics ticket={ticket} /></td><td className="px-5 py-4 text-slate-300">{ticket.assignment_group}</td><td className="px-5 py-4 text-slate-300">{ticket.assignee}</td><td className="px-5 py-4"><button type="button" onClick={() => openTicket(ticket.id)} className="apple-detail-button rounded-lg border border-cyan-500/50 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/10">View</button></td></tr>)}</tbody></table>{visibleTickets.length === 0 && <p className="p-6 text-center text-slate-400">No items match the selected ticket type, assignment groups, and assignee.</p>}</div>}
-    {detailError && <p className="mt-4 text-sm text-rose-300" role="alert">Unable to load ticket: {detailError}</p>}{anomalyBriefing && <AssignmentGroupAnomalyBriefing groups={anomalyBriefing.groups} detection={anomalyBriefing.detection} agentAnalysis={anomalyBriefing.agentAnalysis} onClose={() => setAnomalyBriefing(null)} onOpenTicket={openTicket} />}{briefingAssignee && <AssigneeBriefing assignee={briefingAssignee.name} tickets={briefingTickets} analysis={briefingAssignee.analysis} onClose={() => setBriefingAssignee(null)} />}{selected && <div className="apple-overlay fixed inset-0 z-20 bg-slate-950/70" role="presentation" onMouseDown={() => setSelected(null)}><aside role="dialog" aria-modal="true" aria-label="Ticket details" className="apple-side-panel ml-auto h-full w-full max-w-2xl shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>{selected.loading ? <div className="p-6 text-slate-300">Loading ticket details…</div> : <TicketCard ticket={selected} onClose={() => setSelected(null)} onSelectTicket={openTicket} />}</aside></div>}
+    {detailError && <p className="mt-4 text-sm text-rose-300" role="alert">Unable to load ticket: {detailError}</p>}{anomalyBriefing && <AssignmentGroupAnomalyBriefing groups={anomalyBriefing.groups} detection={anomalyBriefing.detection} agentAnalysis={anomalyBriefing.agentAnalysis} onClose={() => setAnomalyBriefing(null)} onOpenTicket={openTicket} />}{briefingAssignee && <AssigneeBriefing assignee={briefingAssignee.name} tickets={briefingTickets} analysis={briefingAssignee.analysis} referenceTime={referenceTime} onClose={() => setBriefingAssignee(null)} />}{selected && <div className="apple-overlay fixed inset-0 z-20 bg-slate-950/70" role="presentation" onMouseDown={() => setSelected(null)}><aside role="dialog" aria-modal="true" aria-label="Ticket details" className="apple-side-panel ml-auto h-full w-full max-w-2xl shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>{selected.loading ? <div className="p-6 text-slate-300">Loading ticket details…</div> : <TicketCard ticket={selected} onClose={() => setSelected(null)} onSelectTicket={openTicket} />}</aside></div>}
   </section>
 }
