@@ -962,6 +962,9 @@ def query_chat(query: ChatQuery) -> dict[str, object]:
         "retrieval": rag_result["retrieval"],
         "intent": rag_result["intent"],
         "listed_ticket_ids": rag_result["listed_ticket_ids"],
+        # Live Stats visualisation data is optional. SOP and ticket requests
+        # keep their existing clean text-only response contract.
+        "chart_data": rag_result.get("chart_data"),
     }
 
 

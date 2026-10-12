@@ -177,6 +177,42 @@ The browser does not calculate alternative KPI totals. Chart clicks hand API-pro
 
 Assignee and assignment-group questions are answered directly from the live canonical ticket fields, so a small local model cannot omit or invent workload details.
 
+### Chat Data Provenance and Hard-Coding Boundaries
+
+Chat does not render a separate static ticket list. The request path is:
+
+```text
+Chat.jsx → POST /api/chat/query → query_hybrid_rag()
+         → canonical ticket lookup / live Stats aggregation / vector retrieval
+         → clean text response returned to Chat.jsx
+```
+
+The following content is dynamically read at request time from canonical backend stores:
+
+| Question category | Runtime source | Examples |
+| --- | --- | --- |
+| Exact ticket status | `CENTRAL_TICKET_REPOSITORY` | state, assignee, SLA, comments, relationships, suggested next step |
+| Assignee or assignment-group queue | Canonical ticket fields | workload, breached/at-risk order, latest journal, linked records |
+| Dashboard/Stats metrics | `get_dashboard_stats()` over canonical tickets | totals, breaches, on-hold reasons, anomaly inputs, workload |
+| SAP-module questions | Canonical `ticket.sap_modules` tags | SAP BASIS/PLM/EWM scoped counts and ticket lists |
+| Enterprise procedures | `CENTRAL_KNOWLEDGE_DB` → vector corpus | ServiceNow KBA, Veeva SOP, HP ALM, Google Drive SUD evidence |
+
+Current PoC limitations must remain explicit:
+
+1. `MOCK_DB` and `CENTRAL_KNOWLEDGE_DB` are manually authored demo data. They are canonical inside ATLAS, but not live ServiceNow/Veeva/ALM/Drive data yet.
+2. Qwen is **not trained or fine-tuned** on the ATLAS corpus. It is a base local model grounded at runtime through retrieval. Gemini remains an optional future provider.
+3. `rag_engine.py` contains deterministic intent rules and response-formatting helpers. In particular, known high-value SOP topics have curated action sequences to preserve accuracy when an LLM is unavailable or exceeds its timeout. These are code templates, not learned model output.
+4. The Chat welcome text and CR/RCA quick-action labels are UI text constants only; they are not operational data.
+5. The vector index is used for evidence retrieval, never as authority for current ticket state. Ticket/Stats answers must always hydrate final values from the canonical ticket repository.
+
+### Required Chat Correctness Rules
+
+1. Every scoped metric/list response must apply all recognized query filters before formatting a result.
+2. SAP module scope must be derived from `Ticket.sap_modules`; assignment-group scope must be derived from `Ticket.assignment_group`; assignee scope must be derived from `Ticket.assigned_to`.
+3. Chat must never imply it inherits a Dashboard browser selection unless that selection is explicitly supplied in the request payload.
+4. Responses must label the actual data scope used, such as `SAP BASIS module scope` or `full canonical enterprise reporting scope`.
+5. Ticket IDs, counts, comments, status, and relationships must be derived from canonical records—not embedded in response strings.
+
 ## Vector RAG Architecture
 
 `backend/app/vector_store.py` produces a `RetrievalDocument` for each:

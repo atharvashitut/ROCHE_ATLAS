@@ -439,7 +439,85 @@ def _live_stats_snapshot(query_text: str) -> dict[str, Any]:
     )
 
 
-def _stats_answer(query_text: str, stats: dict[str, Any]) -> tuple[str, list[str]]:
+def _stats_scope_label(stats: dict[str, Any]) -> str:
+    """Describe the exact canonical scope used by a live stats response."""
+
+    filters = stats.get("filters", {})
+    groups = filters.get("assignment_groups", [])
+    modules = filters.get("sap_modules", [])
+    assignees = filters.get("assignees", [])
+    if modules:
+        return f"{' and '.join(modules)} module scope"
+    if assignees:
+        return f"{', '.join(assignees)}'s assigned queue"
+    if len(groups) == 1:
+        return f"{groups[0]} assignment-group scope"
+    return "full canonical enterprise reporting scope"
+
+
+def _stats_context_block(stats: dict[str, Any]) -> str:
+    """Serialize live Stats values for the deterministic metrics synthesizer.
+
+    This compact, read-only context is intentionally derived from the same
+    canonical aggregation used by the Stats tab. It prevents a language model
+    from guessing executive metrics while preserving the existing LLM paths
+    for procedural and ticket-specific questions.
+    """
+
+    summary = stats["summary"]
+    sla_segments = {
+        str(segment["label"]): int(segment["value"])
+        for segment in stats["sla_health_breakdown"]
+    }
+    return "\n".join([
+        f"Scope: {_stats_scope_label(stats)}",
+        f"Total records: {summary['total_tickets']}",
+        f"In progress: {summary['in_progress']}",
+        f"On hold: {summary['on_hold']}",
+        f"SLA breached: {sla_segments.get('Breached', 0)}",
+        f"SLA at risk: {sla_segments.get('At Risk', 0)}",
+        f"SLA on track: {sla_segments.get('On Track', 0)}",
+        f"Awaiting caller: {summary['awaiting_caller']}",
+        f"Awaiting change: {summary['awaiting_change']}",
+        f"Awaiting child: {summary['awaiting_child']}",
+        f"Awaiting vendor: {summary['awaiting_vendor']}",
+        f"Awaiting problem: {summary['awaiting_problem']}",
+        f"Awaiting parent: {summary['awaiting_parent']}",
+    ])
+
+
+def _stats_chart_payload(stats: dict[str, Any]) -> dict[str, object]:
+    """Build a UI-neutral chart payload solely from live Stats aggregation."""
+
+    summary = stats["summary"]
+    scope = _stats_scope_label(stats)
+    sla_data = [
+        dict(segment)
+        for segment in stats["sla_health_breakdown"]
+        if segment["label"] != "No SLA (PRB/CHG)"
+    ]
+    work_state_data = [dict(segment) for segment in stats["work_state_breakdown"]]
+    return {
+        "type": "dashboard_summary",
+        "title": f"Live operational snapshot — {scope}",
+        "metrics": [
+            {"label": "Total scope", "value": int(summary["total_tickets"]), "color": "#38bdf8"},
+            {"label": "SLA breached", "value": int(summary["breached"]), "color": "#ef4444"},
+            {"label": "At risk", "value": int(next((item["value"] for item in sla_data if item["label"] == "At Risk"), 0)), "color": "#f59e0b"},
+            {"label": "On hold", "value": int(summary["on_hold"]), "color": "#a78bfa"},
+        ],
+        "charts": [
+            {"type": "bar", "title": "SLA health", "data": sla_data},
+            {"type": "bar", "title": "Active work state", "data": work_state_data},
+        ],
+    }
+
+
+def _stats_answer(
+    query_text: str,
+    stats: dict[str, Any],
+    stats_context: str | None = None,
+) -> tuple[str, list[str]]:
     """Present calculated dashboard values in concise, natural language."""
 
     query = query_text.casefold()
@@ -451,19 +529,12 @@ def _stats_answer(query_text: str, stats: dict[str, Any]) -> tuple[str, list[str
     breached = sla_segments.get("Breached", 0)
     breach_rate = round((breached / eligible) * 100) if eligible else 0
     listed = [str(ticket["number"]) for ticket in stats.get("ticket_index", [])]
-    scope_groups = stats["filters"].get("assignment_groups", [])
-    scope_modules = stats["filters"].get("sap_modules", [])
-    scope_assignees = stats["filters"].get("assignees", [])
-    if scope_modules:
-        scope = f"the {' and '.join(scope_modules)} module scope"
-    elif scope_assignees:
-        scope = f"{', '.join(scope_assignees)}'s assigned queue"
-    elif len(scope_groups) == 1:
-        scope = f"the {scope_groups[0]} assignment-group scope"
-    else:
-        # Chat has no browser-bound selected scope. This is the canonical
-        # reporting window across every assignment group in MOCK_DB.
-        scope = "the full canonical enterprise reporting scope"
+    # Read the scope from the exact serialized snapshot supplied to this
+    # deterministic synthesizer. The numerical values below come from the
+    # same immutable Stats payload rather than from model generation.
+    context_lines = (stats_context or _stats_context_block(stats)).splitlines()
+    scope_value = next((line.removeprefix("Scope: ") for line in context_lines if line.startswith("Scope: ")), _stats_scope_label(stats))
+    scope = f"the {scope_value}"
 
     if any(term in query for term in ("unusual", "anomaly", "abnormal")):
         insights = stats.get("anomaly_detection", {}).get("insights", [])
@@ -585,26 +656,43 @@ def _is_breached_ticket_list_request(query_text: str, history: list[dict[str, st
     """Recognise a direct or contextual request to enumerate SLA breaches."""
 
     query = query_text.casefold()
-    asks_to_list = bool(re.search(r"\b(which|what|show|list|these|those|name)\b", query))
     mentions_breach = "breach" in query
+    # Direct requests such as "Breached tickets in Basis" omit a leading
+    # interrogative, but the plural record noun still unambiguously asks for a
+    # list. Keep contextual pronouns for follow-up requests as well.
+    asks_to_list = bool(re.search(r"\b(which|what|show|list|these|those|name)\b", query)) or bool(
+        mentions_breach and re.search(r"\b(tickets?|incidents?|records?|work items?)\b", query)
+    )
     history_text = " ".join(str(item.get("text", "")) for item in (history or [])[-6:]).casefold()
     return asks_to_list and (mentions_breach or ("breach" in history_text and bool(re.search(r"\b(these|those|them)\b", query))))
 
 
-def _breached_ticket_list_answer() -> tuple[str, list[str]]:
-    """Enumerate the same active SLA breaches used by Dashboard and Stats."""
+def _breached_ticket_list_answer(query_text: str) -> tuple[str, list[str]]:
+    """Enumerate active SLA breaches within the canonical query scope."""
 
+    requested_modules = sorted(_requested_sap_modules(query_text))
     breached = [
         ticket for ticket in central_ticket_records().values()
         if not _is_closed(ticket)
         and ticket.type in {"INC", "RITM"}
         and (ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0))
     ]
+    if requested_modules:
+        breached = [
+            ticket for ticket in breached
+            if set(ticket.sap_modules).intersection(requested_modules)
+        ]
     priority_rank = {"1 - Critical": 1, "2 - High": 2, "3 - Moderate": 3, "4 - Low": 4}
     breached.sort(key=lambda ticket: (priority_rank.get(ticket.priority, 9), ticket.sla_time_remaining or 0, ticket.number))
+    scope = f"{', '.join(requested_modules)}" if requested_modules else "Enterprise"
     if not breached:
-        return "There are no active SLA-breached INC or RITM records in the current enterprise scope.", []
-    lines = [f"SLA-Breached Tickets ({len(breached)})", "", "These are the active records included in the live Dashboard and Stats breach count.", ""]
+        return f"There are no active SLA-breached INC or RITM records in the {scope} module scope.", []
+    lines = [
+        f"{scope} SLA-Breached Tickets ({len(breached)})",
+        "",
+        "These results are filtered directly from canonical ticket SAP-module tags.",
+        "",
+    ]
     for index, ticket in enumerate(breached, start=1):
         lines.extend(_ticket_detail_block(ticket, index))
         lines.append("")
@@ -937,6 +1025,8 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
     assignees = _mentioned_assignees(query_text)
     groups = _mentioned_assignment_groups(query_text)
     operational_scope_intent = False
+    chart_data: dict[str, object] | None = None
+    stats_context: str | None = None
     direct_ticket_ids = _explicit_ticket_numbers(query_text)
     direct_ticket = next((central_ticket_records().get(ticket_id) for ticket_id in direct_ticket_ids if ticket_id in central_ticket_records()), None)
     # A module-specific queue question is a scoped operational lookup.  Keep
@@ -964,24 +1054,34 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
         operational_scope_intent = True
         intent = "direct_ticket"
     elif breach_list_intent:
-        answer, listed_ticket_ids = _breached_ticket_list_answer()
+        answer, listed_ticket_ids = _breached_ticket_list_answer(query_text)
         operational_scope_intent = True
         intent = "breached_ticket_list"
     elif assignees:
         assignee = assignees[0]
         scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assigned_to == assignee]
         answer, listed_ticket_ids = _workload_answer(assignee, scoped_tickets)
+        if _is_metrics_intent(query_text):
+            live_stats = _live_stats_snapshot(query_text)
+            stats_context = _stats_context_block(live_stats)
+            chart_data = _stats_chart_payload(live_stats)
         operational_scope_intent = True
         intent = "assignee_workload"
     elif groups:
         group = groups[0]
         scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assignment_group == group]
         answer, listed_ticket_ids = _workload_answer(group, scoped_tickets)
+        if _is_metrics_intent(query_text):
+            live_stats = _live_stats_snapshot(query_text)
+            stats_context = _stats_context_block(live_stats)
+            chart_data = _stats_chart_payload(live_stats)
         operational_scope_intent = True
         intent = "assignment_group_workload"
     elif stats_intent:
         live_stats = _live_stats_snapshot(query_text)
-        answer, listed_ticket_ids = _stats_answer(query_text, live_stats)
+        stats_context = _stats_context_block(live_stats)
+        answer, listed_ticket_ids = _stats_answer(query_text, live_stats, stats_context)
+        chart_data = _stats_chart_payload(live_stats)
         operational_scope_intent = True
         intent = "live_stats"
     elif ticket_list_intent or module_queue_intent:
@@ -1022,6 +1122,10 @@ def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = Non
         "ticket_ids": ticket_ids,
         "intent": intent,
         "listed_ticket_ids": listed_ticket_ids,
+        # Included for the API contract and diagnostics; it is derived solely
+        # from the central Stats calculation and is not persisted anywhere.
+        "stats_context": stats_context,
+        "chart_data": chart_data,
     }
 
 
