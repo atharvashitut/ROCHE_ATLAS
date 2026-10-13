@@ -21,16 +21,17 @@ function StatCard({ label, value, tone = 'slate', detail, onClick }) {
   return onClick ? <button type="button" onClick={onClick} className={`rounded-2xl border p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-cyan-400/60 ${tones[tone]}`}>{content}</button> : <article className={`rounded-2xl border p-4 shadow-sm ${tones[tone]}`}>{content}</article>
 }
 
-function DonutChart({ title, subtitle, segments, onSegmentClick }) {
+function DonutChart({ title, subtitle, segments = [], onSegmentClick }) {
   const [tooltip, setTooltip] = useState(null)
-  const total = segments.reduce((sum, segment) => sum + segment.value, 0)
+  const safeSegments = Array.isArray(segments) ? segments.filter(Boolean) : []
+  const total = safeSegments.reduce((sum, segment) => sum + Number(segment?.value || 0), 0)
   const circumference = 2 * Math.PI * 46
   let offset = 0
   return <section className="rounded-2xl border border-slate-700 bg-slate-900/70 p-5">
     <div><h2 className="text-base font-semibold">{title}</h2><p className="mt-1 text-sm text-slate-400">{subtitle}</p></div>
     <div className="mt-5 grid gap-5 sm:grid-cols-[150px_1fr] sm:items-center">
-      <div className="relative mx-auto h-36 w-36"><svg viewBox="0 0 120 120" className="h-full w-full -rotate-90" role="img" aria-label={`${title}: ${total} tickets`}><circle cx="60" cy="60" r="46" fill="none" stroke="currentColor" strokeWidth="14" className="text-slate-800" />{total > 0 && segments.map((segment) => { const length = (segment.value / total) * circumference; const node = <circle key={segment.label} cx="60" cy="60" r="46" fill="none" stroke={segment.color} strokeWidth="14" strokeLinecap="butt" strokeDasharray={`${length} ${circumference - length}`} strokeDashoffset={-offset} className="cursor-pointer transition-opacity hover:opacity-75" onClick={() => onSegmentClick?.(segment)} onMouseMove={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, title: segment.label, value: segment.value, share: Math.round((segment.value / total) * 100), lines: [`${title} status · click to inspect`] })} onMouseLeave={() => setTooltip(null)} />; offset += length; return node })}</svg><div className="absolute inset-0 grid place-items-center text-center"><div><p className="text-3xl font-semibold">{total}</p><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">tickets</p></div></div></div>
-      <ul className="space-y-3">{segments.map((segment) => <li key={segment.label}><button type="button" onClick={() => onSegmentClick?.(segment)} className="flex w-full items-center justify-between gap-3 rounded-md text-left text-sm hover:bg-slate-800/60"><span className="flex items-center gap-2 text-slate-300"><span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment.color }} />{segment.label}</span><span className="font-mono text-slate-100">{segment.value}</span></button></li>)}</ul>
+      <div className="relative mx-auto h-36 w-36"><svg viewBox="0 0 120 120" className="h-full w-full -rotate-90" role="img" aria-label={`${title}: ${total} tickets`}><circle cx="60" cy="60" r="46" fill="none" stroke="currentColor" strokeWidth="14" className="text-slate-800" />{total > 0 && safeSegments.map((segment, index) => { const value = Number(segment?.value || 0); const length = (value / total) * circumference; const node = <circle key={segment?.label || index} cx="60" cy="60" r="46" fill="none" stroke={segment?.color || '#64748b'} strokeWidth="14" strokeLinecap="butt" strokeDasharray={`${length} ${circumference - length}`} strokeDashoffset={-offset} className="cursor-pointer transition-opacity hover:opacity-75" onClick={() => onSegmentClick?.(segment)} onMouseMove={(event) => setTooltip({ x: event.clientX + 14, y: event.clientY + 14, title: segment?.label || 'Unlabelled', value, share: Math.round((value / total) * 100), lines: [`${title} status · click to inspect`] })} onMouseLeave={() => setTooltip(null)} />; offset += length; return node })}</svg><div className="absolute inset-0 grid place-items-center text-center"><div><p className="text-3xl font-semibold">{total}</p><p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">tickets</p></div></div></div>
+      <ul className="space-y-3">{safeSegments.map((segment, index) => <li key={segment?.label || index}><button type="button" onClick={() => onSegmentClick?.(segment)} className="flex w-full items-center justify-between gap-3 rounded-md text-left text-sm hover:bg-slate-800/60"><span className="flex items-center gap-2 text-slate-300"><span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: segment?.color || '#64748b' }} />{segment?.label || 'Unlabelled'}</span><span className="font-mono text-slate-100">{segment?.value ?? 0}</span></button></li>)}</ul>
     </div>
     <ChartTooltip tooltip={tooltip} />
   </section>
@@ -115,26 +116,33 @@ export default function Stats({ onDrilldown }) {
     fetchDashboardStats({ assignmentGroups: selectedGroups ? [...selectedGroups] : [], groupFilterActive: selectedGroups !== null, startDate, endDate })
       .then((result) => {
         if (!active) return
+        if (!result || typeof result !== 'object') {
+          setStats(null)
+          setError('The Stats service returned no usable data.')
+          return
+        }
         setStats(result)
         // Reporting dates are provided by the canonical backend catalog; the
         // client only displays and refines the returned operational window.
-        setStartDate((current) => current || result.filters.start_date)
-        setEndDate((current) => current || result.filters.end_date)
+        const filters = result?.filters || {}
+        setStartDate((current) => current || filters.start_date || '')
+        setEndDate((current) => current || filters.end_date || '')
       })
-      .catch((requestError) => active && setError(requestError.message))
+      .catch((requestError) => active && setError(requestError?.message || 'The Stats service could not be reached.'))
       .finally(() => active && setLoading(false))
     return () => { active = false }
   }, [startDate, endDate, selectedGroups])
 
-  const availableGroups = stats?.available_groups || []
+  const availableGroups = Array.isArray(stats?.available_groups) ? stats.available_groups : []
   const effectiveGroups = selectedGroups || new Set(availableGroups)
   const groupList = [...effectiveGroups].sort()
   function toggleGroup(group) { setSelectedGroups((current) => { const next = new Set(current || availableGroups); if (next.has(group)) next.delete(group); else next.add(group); return next }) }
   function selectAllGroups() { setSelectedGroups(new Set(availableGroups)) }
   function deselectAllGroups() { setSelectedGroups(new Set()) }
 
-  const summary = stats?.summary
-  const ticketIndex = stats?.ticket_index || []
+  const filters = stats?.filters || {}
+  const summary = stats?.summary || {}
+  const ticketIndex = Array.isArray(stats?.ticket_index) ? stats.ticket_index : []
   const activeStates = new Set(['In Progress', 'Implement', 'Root Cause Analysis', 'Assess', 'Authorize', 'Scheduled', 'Review', 'Fix in Progress', 'Work in Progress'])
   const closedStates = new Set(['Resolved', 'Closed', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped', 'Canceled'])
   function openDrilldown(title, matcher) {
@@ -156,35 +164,35 @@ export default function Stats({ onDrilldown }) {
       <section className="mt-7">
         <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold uppercase tracking-wider text-slate-300">Executive status</h2><span className="text-xs text-slate-500">Select any metric to inspect matching tickets</span></div>
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 2xl:grid-cols-5">
-          <StatCard label="Total scope" value={summary.total_tickets} detail="All ITSM types" onClick={() => openDrilldown('All tickets in the selected Stats scope', () => true)} />
-          <StatCard label="SLA breached" value={summary.breached} tone="rose" detail="Leadership attention" onClick={() => openDrilldown('SLA-breached tickets', (ticket) => ticket.is_breached)} />
-          <StatCard label="In progress" value={summary.in_progress} tone="emerald" onClick={() => openDrilldown('In-progress tickets', (ticket) => activeStates.has(ticket.state))} />
-          <StatCard label="On hold" value={summary.on_hold} tone="amber" onClick={() => openDrilldown('On-hold tickets', (ticket) => ticket.state === 'On Hold')} />
-          <StatCard label="Awaiting caller" value={summary.awaiting_caller} tone="amber" onClick={() => openDrilldown('On-hold tickets awaiting caller', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Caller')} />
-          <StatCard label="Awaiting change" value={summary.awaiting_change} tone="blue" onClick={() => openDrilldown('On-hold tickets awaiting change', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Change')} />
-          <StatCard label="Awaiting child" value={summary.awaiting_child} tone="violet" onClick={() => openDrilldown('On-hold tickets awaiting child', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Child')} />
-          <StatCard label="Awaiting vendor" value={summary.awaiting_vendor} tone="rose" onClick={() => openDrilldown('On-hold tickets awaiting vendor', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Vendor')} />
-          <StatCard label="Awaiting problem" value={summary.awaiting_problem} tone="blue" onClick={() => openDrilldown('On-hold tickets awaiting problem', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Problem')} />
-          <StatCard label="Awaiting parent" value={summary.awaiting_parent} tone="slate" onClick={() => openDrilldown('On-hold tickets awaiting parent', (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === 'Awaiting Parent')} />
+          <StatCard label="Total scope" value={summary?.total_tickets ?? 0} detail="All ITSM types" onClick={() => openDrilldown('All tickets in the selected Stats scope', () => true)} />
+          <StatCard label="SLA breached" value={summary?.breached ?? 0} tone="rose" detail="Leadership attention" onClick={() => openDrilldown('SLA-breached tickets', (ticket) => ticket?.is_breached)} />
+          <StatCard label="In progress" value={summary?.in_progress ?? 0} tone="emerald" onClick={() => openDrilldown('In-progress tickets', (ticket) => activeStates.has(ticket?.state))} />
+          <StatCard label="On hold" value={summary?.on_hold ?? 0} tone="amber" onClick={() => openDrilldown('On-hold tickets', (ticket) => ticket?.state === 'On Hold')} />
+          <StatCard label="Awaiting caller" value={summary?.awaiting_caller ?? 0} tone="amber" onClick={() => openDrilldown('On-hold tickets awaiting caller', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Caller')} />
+          <StatCard label="Awaiting change" value={summary?.awaiting_change ?? 0} tone="blue" onClick={() => openDrilldown('On-hold tickets awaiting change', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Change')} />
+          <StatCard label="Awaiting child" value={summary?.awaiting_child ?? 0} tone="violet" onClick={() => openDrilldown('On-hold tickets awaiting child', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Child')} />
+          <StatCard label="Awaiting vendor" value={summary?.awaiting_vendor ?? 0} tone="rose" onClick={() => openDrilldown('On-hold tickets awaiting vendor', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Vendor')} />
+          <StatCard label="Awaiting problem" value={summary?.awaiting_problem ?? 0} tone="blue" onClick={() => openDrilldown('On-hold tickets awaiting problem', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Problem')} />
+          <StatCard label="Awaiting parent" value={summary?.awaiting_parent ?? 0} tone="slate" onClick={() => openDrilldown('On-hold tickets awaiting parent', (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === 'Awaiting Parent')} />
         </div>
       </section>
-      <div className="mt-6"><RecordTypePipeline records={stats.record_type_pipeline} onRecordClick={(record) => openDrilldown(`${record.label} records`, (ticket) => ticket.type === record.label)} /></div>
+      <div className="mt-6"><RecordTypePipeline records={stats?.record_type_pipeline ?? []} onRecordClick={(record) => openDrilldown(`${record?.label || 'Unknown'} records`, (ticket) => ticket?.type === record?.label)} /></div>
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
-        <DonutChart title="SLA health" subtitle="Breaches remain visible alongside at-risk and on-track SLA records." segments={stats.sla_health_breakdown} onSegmentClick={(segment) => openDrilldown(`SLA health · ${segment.label}`, (ticket) => (segment.label === 'Breached' ? ticket.is_breached : segment.label === 'At risk' ? !ticket.is_breached && ticket.sla_health === 'YELLOW' : segment.label === 'On track' ? ticket.sla_health === 'GREEN' : ['PRB', 'CHG'].includes(ticket.type)))} />
-        <DonutChart title="SLA breaches by record type" subtitle="Shows the record mix behind breached SLA commitments." segments={stats.breach_by_type} onSegmentClick={(segment) => openDrilldown(`Breached ${segment.label} tickets`, (ticket) => ticket.is_breached && ticket.type === segment.label)} />
-        <DonutChart title="Workflow pipeline" subtitle="Operational state distribution across all selected ITSM record types." segments={stats.pipeline_state_breakdown} onSegmentClick={(segment) => openDrilldown(`Workflow · ${segment.label}`, (ticket) => segment.label === 'Open / Active' ? activeStates.has(ticket.state) : segment.label === 'On hold' ? ticket.state === 'On Hold' : closedStates.has(ticket.state))} />
-        <DonutChart title="Awaiting dependency mix" subtitle="On-hold work, grouped strictly by the ServiceNow hold reason." segments={stats.awaiting_breakdown} onSegmentClick={(segment) => openDrilldown(`On Hold · ${segment.label}`, (ticket) => ticket.state === 'On Hold' && ticket.hold_reason === segment.label)} />
+        <DonutChart title="SLA health" subtitle="Breaches remain visible alongside at-risk and on-track SLA records." segments={stats?.sla_health_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`SLA health · ${segment?.label || 'Unknown'}`, (ticket) => (segment?.label === 'Breached' ? ticket?.is_breached : segment?.label === 'At risk' ? !ticket?.is_breached && ticket?.sla_health === 'YELLOW' : segment?.label === 'On track' ? ticket?.sla_health === 'GREEN' : ['PRB', 'CHG'].includes(ticket?.type)))} />
+        <DonutChart title="SLA breaches by record type" subtitle="Shows the record mix behind breached SLA commitments." segments={stats?.breach_by_type ?? []} onSegmentClick={(segment) => openDrilldown(`Breached ${segment?.label || 'Unknown'} tickets`, (ticket) => ticket?.is_breached && ticket?.type === segment?.label)} />
+        <DonutChart title="Workflow pipeline" subtitle="Operational state distribution across all selected ITSM record types." segments={stats?.pipeline_state_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`Workflow · ${segment?.label || 'Unknown'}`, (ticket) => segment?.label === 'Open / Active' ? activeStates.has(ticket?.state) : segment?.label === 'On hold' ? ticket?.state === 'On Hold' : closedStates.has(ticket?.state))} />
+        <DonutChart title="Awaiting dependency mix" subtitle="On-hold work, grouped strictly by the ServiceNow hold reason." segments={stats?.awaiting_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`On Hold · ${segment?.label || 'Unknown'}`, (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === segment?.label)} />
       </div>
-      <div className="mt-6"><AnomalyDetectionChart detection={stats.anomaly_detection} onInsightClick={(insight) => openDrilldown(`AI anomaly · ${insight.title}`, (ticket) => insight.ticket_ids.includes(ticket.number))} /></div>
+      <div className="mt-6"><AnomalyDetectionChart detection={stats?.anomaly_detection ?? {}} onInsightClick={(insight) => openDrilldown(`AI anomaly · ${insight?.title || 'Unknown'}`, (ticket) => Array.isArray(insight?.ticket_ids) && insight.ticket_ids.includes(ticket?.number))} /></div>
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
-        <TeamSlaOwnership teams={stats.team_sla_health} onTeamStatusClick={(team, status) => openDrilldown(`${team.group} · ${status.replace('_', ' ')}`, (ticket) => ticket.assignment_group === team.group && (status === 'all' || status === 'breached' && ticket.is_breached || status === 'at_risk' && !ticket.is_breached && ticket.sla_health === 'YELLOW' || status === 'on_track' && ticket.sla_health === 'GREEN'))} />
-        <TeamWorkload workload={stats.team_workload} onTeamClick={(team) => openDrilldown(`${team.group} workload`, (ticket) => ticket.assignment_group === team.group)} />
+        <TeamSlaOwnership teams={stats?.team_sla_health ?? []} onTeamStatusClick={(team, status) => openDrilldown(`${team?.group || 'Unknown'} · ${String(status || 'all').replace('_', ' ')}`, (ticket) => ticket?.assignment_group === team?.group && (status === 'all' || status === 'breached' && ticket?.is_breached || status === 'at_risk' && !ticket?.is_breached && ticket?.sla_health === 'YELLOW' || status === 'on_track' && ticket?.sla_health === 'GREEN'))} />
+        <TeamWorkload workload={stats?.team_workload ?? []} onTeamClick={(team) => openDrilldown(`${team?.group || 'Unknown'} workload`, (ticket) => ticket?.assignment_group === team?.group)} />
       </div>
-      <div className="mt-6"><IncidentTrend trend={stats.work_item_trend} onMonthClick={(point) => openDrilldown(`Work items opened in ${point.label}`, (ticket) => ticket.opened_on?.startsWith(point.month.slice(0, 7)))} /></div>
+      <div className="mt-6"><IncidentTrend trend={stats?.work_item_trend ?? {}} onMonthClick={(point) => openDrilldown(`Work items opened in ${point?.label || 'Unknown period'}`, (ticket) => ticket?.opened_on?.startsWith(String(point?.month || '').slice(0, 7)))} /></div>
       <div className="mt-6 grid gap-6 2xl:grid-cols-2">
-        <AssigneeCapacityMatrix assignees={stats.assignee_workload} onAssigneeClick={(assignee) => openDrilldown(`${assignee.assignee} workload`, (ticket) => ticket.assignee === assignee.assignee)} />
-        <TeamStatusCall teams={stats.team_status_call} onTeamClick={(team) => openDrilldown(`${team.group} status call`, (ticket) => ticket.assignment_group === team.group)} />
+        <AssigneeCapacityMatrix assignees={stats?.assignee_workload ?? []} onAssigneeClick={(assignee) => openDrilldown(`${assignee?.assignee || 'Unknown'} workload`, (ticket) => ticket?.assignee === assignee?.assignee)} />
+        <TeamStatusCall teams={stats?.team_status_call ?? []} onTeamClick={(team) => openDrilldown(`${team?.group || 'Unknown'} status call`, (ticket) => ticket?.assignment_group === team?.group)} />
       </div>
-      <p className="mt-4 text-xs text-slate-500">Reporting window: {stats.filters.start_date} to {stats.filters.end_date}. Every KPI and chart reflects the assignment groups currently selected above.</p>
+      <p className="mt-4 text-xs text-slate-500">Reporting window: {filters.start_date || 'not available'} to {filters.end_date || 'not available'}. Every KPI and chart reflects the assignment groups currently selected above.</p>
     </>}</section>
 }

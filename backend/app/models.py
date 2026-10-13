@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import date, timedelta
 from typing import Literal
 
@@ -14,6 +15,7 @@ HealthColor = Literal["RED", "YELLOW", "GREEN"]
 TicketType = Literal["INC", "RITM", "PRB", "CHG"]
 SlaStatus = Literal["BREACHED", "AT_RISK", "ON_TRACK"]
 Sentiment = Literal["Frustrated", "Impatient", "Calm"]
+SLA_WARNING_BUFFER_MINUTES = max(1, int(os.getenv("ATLAS_SLA_WARNING_BUFFER_MINUTES", "90")))
 
 
 ALL_ASSIGNMENT_GROUPS = [
@@ -193,7 +195,7 @@ class Ticket(BaseModel):
         self.sla_remaining_mins = self.sla_remaining_minutes
         self.sla_time_remaining = self.sla_remaining_minutes
         if self.sla_time_remaining is not None:
-            self.sla_health = "RED" if self.sla_time_remaining <= 0 else "YELLOW" if self.sla_time_remaining <= 90 else "GREEN"
+            self.sla_health = "RED" if self.sla_time_remaining <= 0 else "YELLOW" if self.sla_time_remaining <= SLA_WARNING_BUFFER_MINUTES else "GREEN"
         self.parent_incident_id = self.parent_id or self.parent_incident_id
         self.parent_id = self.parent_incident_id
         self.child_incident_ids = self.child_ids or self.child_incident_ids
@@ -378,6 +380,17 @@ def is_sla_breached(ticket: Ticket) -> bool:
     return ticket.type in {"INC", "RITM"} and (
         ticket.is_breached
         or (ticket.sla_remaining_minutes is not None and ticket.sla_remaining_minutes <= 0)
+    )
+
+
+def is_sla_at_risk(ticket: Ticket) -> bool:
+    """Return the one configured warning-window decision for SLA analytics."""
+
+    return bool(
+        ticket.type in {"INC", "RITM"}
+        and not is_sla_breached(ticket)
+        and ticket.sla_remaining_minutes is not None
+        and 0 < ticket.sla_remaining_minutes <= SLA_WARNING_BUFFER_MINUTES
     )
 
 

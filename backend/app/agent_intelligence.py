@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import date
 from typing import Any, Iterable
 
-from .models import Ticket, effective_hold_reason, is_sla_breached
+from .models import Ticket, effective_hold_reason, is_sla_at_risk, is_sla_breached
 
 
 CLOSED_STATES = {"Closed", "Resolved", "Closed Complete", "Closed Incomplete", "Closed Skipped", "Canceled"}
@@ -32,12 +32,7 @@ def _pending_tasks(ticket: Ticket) -> list[dict[str, object]]:
 
 
 def _near_breach(ticket: Ticket) -> bool:
-    return (
-        ticket.type in {"INC", "RITM"}
-        and not is_sla_breached(ticket)
-        and ticket.sla_remaining_minutes is not None
-        and 0 < ticket.sla_remaining_minutes <= 90
-    )
+    return is_sla_at_risk(ticket)
 
 
 def _sentiment_risk(ticket: Ticket) -> bool:

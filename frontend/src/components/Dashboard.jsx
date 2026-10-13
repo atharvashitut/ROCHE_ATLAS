@@ -15,12 +15,16 @@ const healthStyles = {
   GREEN: 'bg-emerald-500/15 text-emerald-200 ring-emerald-400/30',
 }
 const closedTaskStates = new Set(['Closed', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped', 'Canceled'])
-function pendingTasks(tasks = []) {
-  return tasks.filter((task) => !closedTaskStates.has(task.state))
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function pendingTasks(tasks) {
+  return asArray(tasks).filter((task) => !closedTaskStates.has(task?.state))
 }
 
 function latestActivityAt(ticket) {
-  const entries = [...(ticket.comments || []), ...(ticket.work_notes || [])]
+  const entries = [...asArray(ticket?.comments), ...asArray(ticket?.work_notes)]
   const timestamps = entries
     .map((entry) => Date.parse(String(entry.sys_created_on || '').replace(' ', 'T')))
     .filter(Number.isFinite)
@@ -28,20 +32,21 @@ function latestActivityAt(ticket) {
 }
 
 function operationalReferenceTime(tickets = []) {
-  const timestamps = tickets.flatMap((ticket) => [ticket.opened_on, ...(ticket.comments || []).map((entry) => entry.sys_created_on), ...(ticket.work_notes || []).map((entry) => entry.sys_created_on)])
+  const timestamps = asArray(tickets).flatMap((ticket) => [ticket?.opened_on, ...asArray(ticket?.comments).map((entry) => entry?.sys_created_on), ...asArray(ticket?.work_notes).map((entry) => entry?.sys_created_on)])
     .map((value) => Date.parse(String(value || '').replace(' ', 'T')))
     .filter(Number.isFinite)
   return timestamps.length ? Math.max(...timestamps) : Date.now()
 }
 
 function problemIsStale(ticket, referenceTime) {
-  if (ticket.type !== 'PRB') return false
+  if (ticket?.type !== 'PRB') return false
   const lastActivity = latestActivityAt(ticket)
   const olderThanSevenDays = lastActivity !== null && referenceTime - lastActivity > 7 * 24 * 60 * 60 * 1000
   return olderThanSevenDays || pendingTasks(ticket.ptasks).length > 0
 }
 
 function urgencyRank(ticket, referenceTime) {
+  if (!ticket || typeof ticket !== 'object') return 99
   const remaining = slaRemainingMinutes(ticket)
   const breached = ticket.is_breached || (typeof remaining === 'number' && remaining <= 0)
   const nearBreach = typeof remaining === 'number' && remaining > 0 && remaining <= 90
@@ -74,19 +79,20 @@ function hasOperationalWarning(tickets = [], referenceTime) {
 }
 
 function slaRemainingMinutes(ticket) {
-  return ticket.sla_remaining_minutes ?? ticket.sla_remaining_mins
+  return ticket?.sla_remaining_minutes ?? ticket?.sla_remaining_mins
 }
 
 function SlaBadge({ ticket }) {
   const remaining = slaRemainingMinutes(ticket)
   if (typeof remaining !== 'number') return null
-  const isBreached = ticket.is_breached || remaining <= 0
-  if (isBreached) return <span className="inline-flex rounded-full border border-rose-500/50 bg-rose-950/60 px-2 py-1 text-xs font-bold text-rose-200">🚨 Breached ({Math.abs(remaining)}m overdue) · {ticket.breach_reason}</span>
+  const isBreached = ticket?.is_breached || remaining <= 0
+  if (isBreached) return <span className="inline-flex rounded-full border border-rose-500/50 bg-rose-950/60 px-2 py-1 text-xs font-bold text-rose-200">🚨 Breached ({Math.abs(remaining)}m overdue) · {ticket?.breach_reason || 'SLA commitment missed'}</span>
   const styles = remaining <= 90 ? 'border-amber-500/50 bg-amber-950/60 text-amber-200' : 'border-emerald-500/50 bg-emerald-950/60 text-emerald-200'
   return <span className={`inline-flex rounded-full border px-2 py-1 text-xs font-bold ${styles}`}>⏳ {remaining}m remaining</span>
 }
 
 function ContextMetrics({ ticket }) {
+  if (!ticket || typeof ticket !== 'object') return null
   const holdReason = ticket.state === 'On Hold' ? ticket.hold_reason : null
   const holdReasonLine = holdReason && <p className="font-semibold text-amber-200"><span className="text-slate-500">On Hold ·</span> {holdReason}</p>
   if (ticket.type === 'INC' || ticket.type === 'RITM') return <div className="space-y-1 text-xs text-slate-300">{holdReasonLine}<p><span className="text-slate-500">Sentiment:</span> {ticket.sentiment}</p></div>
@@ -99,10 +105,11 @@ function hasDetailFields(ticket) {
 }
 
 function AssigneeBriefing({ assignee, tickets, analysis, referenceTime, onClose }) {
-  const urgentItems = tickets.filter((ticket) => urgencyRank(ticket, referenceTime) < 10)
-  const staleProblems = tickets.filter((ticket) => problemIsStale(ticket, referenceTime))
-  const pendingChanges = tickets.filter((ticket) => ticket.type === 'CHG' && pendingTasks(ticket.ctasks).length > 0)
-  const agentFindings = analysis?.findings || []
+  const queue = asArray(tickets)
+  const urgentItems = queue.filter((ticket) => urgencyRank(ticket, referenceTime) < 10)
+  const staleProblems = queue.filter((ticket) => problemIsStale(ticket, referenceTime))
+  const pendingChanges = queue.filter((ticket) => ticket?.type === 'CHG' && pendingTasks(ticket?.ctasks).length > 0)
+  const agentFindings = asArray(analysis?.findings)
   const urgentFinding = agentFindings.find((finding) => finding.id === 'assignee-risk-priority')
   const problemFinding = agentFindings.find((finding) => finding.id === 'assignee-stale-problems')
   const changeFinding = agentFindings.find((finding) => finding.id === 'assignee-pending-changes')
@@ -113,7 +120,7 @@ function AssigneeBriefing({ assignee, tickets, analysis, referenceTime, onClose 
   }
   return <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/75 p-4 backdrop-blur-sm" role="presentation" onMouseDown={onClose}>
     <section role="dialog" aria-modal="true" aria-label={`${assignee} operational briefing`} className="w-full max-w-3xl rounded-2xl border border-cyan-500/35 bg-slate-900 p-6 shadow-2xl shadow-slate-950/70" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="flex items-start justify-between gap-4 border-b border-slate-700 pb-4"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Assignee operational briefing</p><h2 className="mt-2 text-2xl font-semibold text-slate-50">{assignee}</h2><p className="mt-1 text-sm text-slate-400">{analysis?.summary || `${tickets.length} ticket${tickets.length === 1 ? '' : 's'} in the active dashboard scope, ordered by operational urgency.`}</p></div><button type="button" onClick={onClose} aria-label="Close operational briefing" className="rounded-full border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition hover:border-cyan-400 hover:bg-slate-800">×</button></div>
+      <div className="flex items-start justify-between gap-4 border-b border-slate-700 pb-4"><div><p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300">Assignee operational briefing</p><h2 className="mt-2 text-2xl font-semibold text-slate-50">{assignee}</h2><p className="mt-1 text-sm text-slate-400">{analysis?.summary || `${queue.length} ticket${queue.length === 1 ? '' : 's'} in the active dashboard scope, ordered by operational urgency.`}</p></div><button type="button" onClick={onClose} aria-label="Close operational briefing" className="rounded-full border border-slate-600 px-3 py-1.5 text-sm text-slate-200 transition hover:border-cyan-400 hover:bg-slate-800">×</button></div>
       <div className="mt-5 grid gap-4 md:grid-cols-3"><section className="rounded-xl border border-rose-500/35 bg-rose-950/20 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-rose-200">Urgent incidents</p><p className="mt-2 text-3xl font-semibold text-rose-100">{urgentItems.length}</p>{urgentFinding && <p className="mt-2 text-xs leading-5 text-rose-100/80">{urgentFinding.recommended_action}</p>}<div className="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1 custom-scrollbar">{urgentItems.length ? urgentItems.map((ticket) => <p key={ticket.number} className="text-xs leading-5 text-slate-200"><span className="font-mono text-rose-200">{ticket.number}</span> · {ticket.short_description || ticket.title}<br /><span className="text-amber-200">{ticket.sentiment || ticket.customer_sentiment?.status || 'Customer sentiment not recorded'}</span></p>) : <p className="text-xs text-slate-500">No breached or near breach customer incidents.</p>}</div></section><section className="rounded-xl border border-amber-500/35 bg-amber-950/20 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-amber-200">Stale problems</p><p className="mt-2 text-3xl font-semibold text-amber-100">{staleProblems.length}</p>{problemFinding && <p className="mt-2 text-xs leading-5 text-amber-100/80">{problemFinding.recommended_action}</p>}<div className="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1 custom-scrollbar">{staleProblems.length ? staleProblems.map((ticket) => <p key={ticket.number} className="text-xs leading-5 text-slate-200"><span className="font-mono text-amber-200">{ticket.number}</span> · {ageLabel(ticket)}<br /><span className="text-slate-400">{pendingTasks(ticket.ptasks).length} pending PTask{pendingTasks(ticket.ptasks).length === 1 ? '' : 's'}</span></p>) : <p className="text-xs text-slate-500">No stale problem records.</p>}</div></section><section className="rounded-xl border border-violet-500/35 bg-violet-950/20 p-4"><p className="text-xs font-semibold uppercase tracking-wider text-violet-200">Changes needing action</p><p className="mt-2 text-3xl font-semibold text-violet-100">{pendingChanges.length}</p>{changeFinding && <p className="mt-2 text-xs leading-5 text-violet-100/80">{changeFinding.recommended_action}</p>}<div className="mt-3 max-h-36 space-y-2 overflow-y-auto pr-1 custom-scrollbar">{pendingChanges.length ? pendingChanges.map((ticket) => <p key={ticket.number} className="text-xs leading-5 text-slate-200"><span className="font-mono text-violet-200">{ticket.number}</span> · {ticket.short_description || ticket.title}<br /><span className="text-slate-400">{pendingTasks(ticket.ctasks).length} pending CTask{pendingTasks(ticket.ctasks).length === 1 ? '' : 's'}</span></p>) : <p className="text-xs text-slate-500">No pending change tasks.</p>}</div></section></div>
       <div className="mt-5 flex justify-end"><button type="button" onClick={onClose} className="rounded-lg border border-cyan-400/50 bg-cyan-500/10 px-4 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/20">Review sorted dashboard</button></div>
     </section>
@@ -121,7 +128,8 @@ function AssigneeBriefing({ assignee, tickets, analysis, referenceTime, onClose 
 }
 
 function AssignmentGroupAnomalyBriefing({ groups, detection, agentAnalysis, onClose, onOpenTicket }) {
-  const insights = agentAnalysis?.findings?.length ? agentAnalysis.findings : (detection?.insights || [])
+  const agentFindings = asArray(agentAnalysis?.findings)
+  const insights = agentFindings.length ? agentFindings : asArray(detection?.insights)
   const summary = detection?.summary || { total: 0, high: 0, medium: 0, impacted_tickets: 0 }
   return <div className="fixed inset-0 z-40 grid place-items-center bg-slate-950/75 p-4 backdrop-blur-sm" role="presentation" onMouseDown={onClose}>
     <section role="dialog" aria-modal="true" aria-label="Assignment group anomaly briefing" className="w-full max-w-3xl rounded-2xl border border-violet-500/35 bg-slate-900 p-6 shadow-2xl shadow-slate-950/70" onMouseDown={(event) => event.stopPropagation()}>
@@ -157,13 +165,16 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
     Promise.all([fetchDashboardTickets(), fetchAssignmentGroups()])
       .then(([ticketResult, groupResult]) => {
         if (!active) return
-        setTickets(ticketResult.tickets)
-        setAssignmentGroups(groupResult.assignment_groups)
-        setMyTeamGroups(groupResult.default_my_team_groups || [])
-        setSelectedGroups(new Set(groupResult.assignment_groups))
-        setSelectedAssignees(new Set(ticketResult.tickets.map((ticket) => ticket.assignee)))
+        const loadedTickets = ticketResult?.tickets ?? ticketResult?.data?.tickets ?? []
+        const safeTickets = asArray(loadedTickets)
+        const safeGroups = asArray(groupResult?.assignment_groups ?? groupResult?.data?.assignment_groups)
+        setTickets(safeTickets)
+        setAssignmentGroups(safeGroups)
+        setMyTeamGroups(asArray(groupResult?.default_my_team_groups))
+        setSelectedGroups(new Set(safeGroups))
+        setSelectedAssignees(new Set(safeTickets.map((ticket) => ticket?.assignee).filter(Boolean)))
       })
-      .catch((requestError) => active && setError(requestError.message))
+      .catch((requestError) => active && setError(requestError?.message || 'The ticket queue could not be loaded.'))
       .finally(() => active && setLoading(false))
     return () => { active = false }
   }, [])
@@ -184,29 +195,32 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
     return () => { window.removeEventListener('keydown', closeOnEscape); window.removeEventListener('mousedown', closeFilterMenus) }
   }, [])
 
-  const assignees = useMemo(() => [...new Set(tickets.map((ticket) => ticket.assignee))].sort(), [tickets])
-  const matchingGroups = useMemo(() => assignmentGroups.filter((group) => group.toLowerCase().includes(groupSearch.trim().toLowerCase())), [assignmentGroups, groupSearch])
-  const drilldownTicketIds = useMemo(() => new Set(drilldown?.ticketIds || []), [drilldown])
-  const activeGroups = useMemo(() => drilldown ? new Set(drilldown.assignmentGroups || []) : selectedGroups, [drilldown, selectedGroups])
-  const activeAssignees = useMemo(() => drilldown ? new Set(drilldown.assignees || []) : selectedAssignees, [drilldown, selectedAssignees])
+  const assignees = useMemo(() => [...new Set(asArray(tickets).map((ticket) => ticket?.assignee).filter(Boolean))].sort(), [tickets])
+  const matchingGroups = useMemo(() => asArray(assignmentGroups).filter((group) => String(group || '').toLowerCase().includes(groupSearch.trim().toLowerCase())), [assignmentGroups, groupSearch])
+  const drilldownTicketIds = useMemo(() => new Set(asArray(drilldown?.ticketIds)), [drilldown])
+  const activeGroups = useMemo(() => drilldown ? new Set(asArray(drilldown?.assignmentGroups)) : selectedGroups, [drilldown, selectedGroups])
+  const activeAssignees = useMemo(() => drilldown ? new Set(asArray(drilldown?.assignees)) : selectedAssignees, [drilldown, selectedAssignees])
+  // An empty group selection intentionally clears the queue without throwing
+  // away the cached canonical response needed when the user selects again.
+  const queueTickets = useMemo(() => activeGroups.size ? asArray(tickets) : [], [activeGroups, tickets])
   const briefingAssigneeName = briefingAssignee?.name || null
   const referenceTime = useMemo(() => operationalReferenceTime(tickets), [tickets])
   const assigneeFocused = Boolean(briefingAssigneeName) || activeAssignees.size < assignees.length
   const visibleTickets = useMemo(() => {
-    const filtered = tickets.filter((ticket) => (
-      activeGroups.has(ticket.assignment_group)
+    const filtered = queueTickets.filter((ticket) => (
+      ticket && activeGroups.has(ticket.assignment_group)
       && (drilldown || activeType === 'ALL' || ticket.type === activeType)
       && activeAssignees.has(ticket.assignee)
       && (!drilldown || drilldownTicketIds.has(ticket.number || ticket.id))
     ))
     return assigneeFocused ? filtered.sort((left, right) => sortByOperationalUrgency(left, right, referenceTime)) : filtered
-  }, [activeGroups, activeAssignees, activeType, assigneeFocused, drilldown, drilldownTicketIds, referenceTime, tickets])
-  const briefingTickets = useMemo(() => tickets
+  }, [activeGroups, activeAssignees, activeType, assigneeFocused, drilldown, drilldownTicketIds, queueTickets, referenceTime])
+  const briefingTickets = useMemo(() => queueTickets
     .filter((ticket) => ticket.assignee === briefingAssigneeName && activeGroups.has(ticket.assignment_group))
-    .sort((left, right) => sortByOperationalUrgency(left, right, referenceTime)), [activeGroups, briefingAssigneeName, referenceTime, tickets])
+    .sort((left, right) => sortByOperationalUrgency(left, right, referenceTime)), [activeGroups, briefingAssigneeName, queueTickets, referenceTime])
 
   function showAnomalyBriefing(groups) {
-    if (!groups.size) {
+    if (!(groups instanceof Set) || !groups.size) {
       anomalyRequestRef.current += 1
       setAnomalyBriefing(null)
       return
@@ -218,8 +232,8 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
         if (requestId !== anomalyRequestRef.current) return
         // Group owners are interrupted only for an explainable abnormal
         // pattern, never for a normal operational selection.
-        if (result.anomaly_detection?.insights?.length) {
-          setAnomalyBriefing({ groups: [...groups], detection: result.anomaly_detection, agentAnalysis: result.assignment_group_agent })
+        if (asArray(result?.anomaly_detection?.insights).length) {
+          setAnomalyBriefing({ groups: [...groups], detection: result?.anomaly_detection ?? {}, agentAnalysis: result?.assignment_group_agent ?? {} })
         } else {
           setAnomalyBriefing(null)
         }
@@ -228,7 +242,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
   }
 
   function toggleGroup(group) {
-    const next = new Set(selectedGroups)
+    const next = new Set(selectedGroups || [])
     if (next.has(group)) next.delete(group)
     else next.add(group)
     setSelectedGroups(next)
@@ -243,7 +257,12 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
   }
 
   function selectAllGroups() { const groups = new Set(assignmentGroups); setSelectedGroups(groups); showAnomalyBriefing(groups) }
-  function deselectAllGroups() { setSelectedGroups(new Set()); setAnomalyBriefing(null) }
+  function deselectAllGroups() {
+    setSelectedGroups(new Set())
+    setSelected(null)
+    setDetailError('')
+    setAnomalyBriefing(null)
+  }
   function toggleAssignee(name) {
     const willSelect = !selectedAssignees.has(name)
     setSelectedAssignees((current) => {
@@ -253,7 +272,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
       return next
     })
     if (willSelect) {
-      const assigneeTickets = tickets.filter((ticket) => ticket.assignee === name && activeGroups.has(ticket.assignment_group))
+      const assigneeTickets = queueTickets.filter((ticket) => ticket?.assignee === name && activeGroups.has(ticket?.assignment_group))
       // The assignee modal is an intervention warning, not a routine status
       // dialog. A healthy SLA and sentiment workload stays on the queue.
       if (!hasOperationalWarning(assigneeTickets, referenceTime)) {
@@ -262,7 +281,7 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
       }
       setBriefingAssignee({ name, analysis: null })
       fetchDashboardStats({ assignmentGroups: [...activeGroups], assignees: [name], groupFilterActive: true })
-        .then((result) => setBriefingAssignee((current) => current?.name === name ? { name, analysis: result.assignee_agent } : current))
+        .then((result) => setBriefingAssignee((current) => current?.name === name ? { name, analysis: result?.assignee_agent ?? null } : current))
         // The established local briefing remains available if optional agent
         // analysis cannot be generated.
         .catch(() => {})
@@ -273,19 +292,22 @@ export default function Dashboard({ drilldown, onReturnToStats, onClearDrilldown
 
   async function openTicket(ticketId) {
     setDetailError('')
-    const cachedTicket = tickets.find((ticket) => ticket.id === ticketId || ticket.number === ticketId || ticket.sys_id === ticketId)
+    const cachedTicket = asArray(tickets).find((ticket) => ticket?.id === ticketId || ticket?.number === ticketId || ticket?.sys_id === ticketId)
     if (cachedTicket) {
       setSelected(cachedTicket)
       if (hasDetailFields(cachedTicket)) return
       try {
         const result = await fetchTicket(ticketId)
-        setSelected((current) => current?.number === cachedTicket.number ? result.ticket : current)
-      } catch (requestError) { setDetailError(requestError.message) }
+        setSelected((current) => current?.number === cachedTicket.number ? (result?.ticket ?? cachedTicket) : current)
+      } catch (requestError) { setDetailError(requestError?.message || 'Ticket details could not be loaded.') }
       return
     }
     setSelected({ loading: true })
-    try { const result = await fetchTicket(ticketId); setSelected(result.ticket) }
-    catch (requestError) { setDetailError(requestError.message); setSelected(null) }
+    try {
+      const result = await fetchTicket(ticketId)
+      if (!result?.ticket) throw new Error('Ticket details are unavailable.')
+      setSelected(result.ticket)
+    } catch (requestError) { setDetailError(requestError?.message || 'Ticket details could not be loaded.'); setSelected(null) }
   }
 
   return <section className="mx-auto max-w-7xl px-4 py-10 sm:px-6">

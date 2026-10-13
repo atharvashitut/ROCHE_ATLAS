@@ -2,8 +2,12 @@ import KnowledgeReferences from './KnowledgeReferences'
 import TopologyTree from './TopologyTree'
 import WorkItemActivities from './WorkItemActivities'
 
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
 function SentimentBadge({ ticket }) {
-  if (!['INC', 'RITM'].includes(ticket.type) || !ticket.customer_sentiment) return null
+  if (!ticket || !['INC', 'RITM'].includes(ticket.type) || !ticket.customer_sentiment) return null
   const sentiment = ticket.customer_sentiment
   const faces = { Frustrated: '😠', Impatient: '😟', Satisfied: '😊', Neutral: '😐' }
   const critical = sentiment.status === 'Frustrated' || ticket.priority?.startsWith('1 -')
@@ -12,35 +16,36 @@ function SentimentBadge({ ticket }) {
 }
 
 function SlaBadge({ ticket }) {
-  const remaining = ticket.sla_remaining_minutes ?? ticket.sla_remaining_mins
+  const remaining = ticket?.sla_remaining_minutes ?? ticket?.sla_remaining_mins
   if (typeof remaining !== 'number') return null
-  const isBreached = ticket.is_breached || remaining <= 0
-  if (isBreached) return <span className="rounded-full border border-rose-500/50 bg-rose-950/60 px-2 py-1 text-xs font-bold text-rose-200">🚨 Breached ({Math.abs(remaining)}m overdue) · {ticket.breach_reason}</span>
+  const isBreached = ticket?.is_breached || remaining <= 0
+  if (isBreached) return <span className="rounded-full border border-rose-500/50 bg-rose-950/60 px-2 py-1 text-xs font-bold text-rose-200">🚨 Breached ({Math.abs(remaining)}m overdue) · {ticket?.breach_reason || 'SLA commitment missed'}</span>
   const styles = remaining <= 90 ? 'border-amber-500/50 bg-amber-950/60 text-amber-200' : 'border-emerald-500/50 bg-emerald-950/60 text-emerald-200'
   return <span className={`rounded-full border px-2 py-1 text-xs font-bold ${styles}`}>⏳ {remaining}m remaining</span>
 }
 
 function HoldReasonBadge({ ticket }) {
-  if (ticket.state !== 'On Hold' || !ticket.hold_reason) return null
+  if (ticket?.state !== 'On Hold' || !ticket?.hold_reason) return null
   return <span className="rounded-full border border-amber-500/50 bg-amber-950/60 px-2 py-1 text-xs font-bold text-amber-200">⏸ On Hold · {ticket.hold_reason}</span>
 }
 
 function ExecutiveBriefing({ ticket }) {
-  const remaining = ticket.sla_remaining_minutes ?? ticket.sla_remaining_mins
-  const sla = ticket.is_breached || (typeof remaining === 'number' && remaining <= 0) ? `${Math.abs(remaining || 0)}m overdue` : typeof remaining === 'number' ? `${remaining}m remaining` : 'SLA not recorded'
-  const fallbackAction = (ticket.ai_resolution_guide || 'Validate the current service state and update the requester.').split('. ')[0]
-  const insight = ticket.ai_insight || { confidence_score: 70, resolution_summary: ticket.ai_resolution_guide, resolution_actions: [{ action: fallbackAction, why: 'This is the current recovery guide for the record.' }] }
-  const actions = insight.resolution_actions || insight.recommended_actions || []
-  return <section className="apple-briefing rounded-2xl border border-teal-400/30 bg-teal-950/20 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-teal-100">AI Executive Resolution Plan</h3><p className="mt-1 text-xs text-teal-100/70">Consolidated from the record, linked work, journal evidence, and enterprise knowledge.</p></div><span className="rounded-full border border-teal-400/35 bg-teal-400/10 px-2 py-1 text-xs font-semibold text-teal-100">{insight.confidence_score}% confidence</span></div><div className="mt-3 space-y-1 text-sm leading-6 text-slate-300"><p>{ticket.short_description || ticket.title}.</p><p>{ticket.state} · {sla}.</p><p>{insight.resolution_summary || ticket.ai_resolution_guide}</p></div><div className="mt-4 max-h-56 space-y-2 overflow-y-auto rounded-xl border border-teal-400/15 bg-slate-950/25 p-3 pr-2 custom-scrollbar text-xs"><p className="font-semibold uppercase tracking-wider text-teal-200">Technical resolution steps</p>{actions.map((item, index) => <article key={item.action} className="rounded-lg border border-slate-700/80 bg-slate-900/45 p-3"><p className="font-semibold leading-5 text-teal-100"><span className="mr-2 inline-grid h-5 w-5 place-items-center rounded-full bg-teal-400/15 text-[11px]">{index + 1}</span>{item.action}</p><p className="mt-1 pl-7 leading-5 text-slate-400">{item.why}</p>{item.sources && <p className="mt-2 pl-7 text-[11px] leading-4 text-teal-200/70">Grounded in: {item.sources}</p>}</article>)}</div></section>
+  const remaining = ticket?.sla_remaining_minutes ?? ticket?.sla_remaining_mins
+  const sla = ticket?.is_breached || (typeof remaining === 'number' && remaining <= 0) ? `${Math.abs(remaining || 0)}m overdue` : typeof remaining === 'number' ? `${remaining}m remaining` : 'SLA not recorded'
+  const fallbackAction = String(ticket?.ai_resolution_guide || 'Validate the current service state and update the requester.').split('. ')[0]
+  const insight = ticket?.ai_insight && typeof ticket.ai_insight === 'object' ? ticket.ai_insight : { confidence_score: 70, resolution_summary: ticket?.ai_resolution_guide, resolution_actions: [{ action: fallbackAction, why: 'This is the current recovery guide for the record.' }] }
+  const actions = asArray(insight?.resolution_actions ?? insight?.recommended_actions)
+  return <section className="apple-briefing rounded-2xl border border-teal-400/30 bg-teal-950/20 p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-teal-100">AI Executive Resolution Plan</h3><p className="mt-1 text-xs text-teal-100/70">Consolidated from the record, linked work, journal evidence, and enterprise knowledge.</p></div><span className="rounded-full border border-teal-400/35 bg-teal-400/10 px-2 py-1 text-xs font-semibold text-teal-100">{insight?.confidence_score ?? 70}% confidence</span></div><div className="mt-3 space-y-1 text-sm leading-6 text-slate-300"><p>{ticket.short_description || ticket.title}.</p><p>{ticket.state} · {sla}.</p><p>{insight?.resolution_summary || ticket.ai_resolution_guide}</p></div><div className="mt-4 max-h-56 space-y-2 overflow-y-auto rounded-xl border border-teal-400/15 bg-slate-950/25 p-3 pr-2 custom-scrollbar text-xs"><p className="font-semibold uppercase tracking-wider text-teal-200">Technical resolution steps</p>{actions.filter((item) => item && typeof item === 'object').map((item, index) => <article key={item.action || index} className="rounded-lg border border-slate-700/80 bg-slate-900/45 p-3"><p className="font-semibold leading-5 text-teal-100"><span className="mr-2 inline-grid h-5 w-5 place-items-center rounded-full bg-teal-400/15 text-[11px]">{index + 1}</span>{item.action || 'Validate the next recovery step'}</p><p className="mt-1 pl-7 leading-5 text-slate-400">{item.why || 'No rationale was supplied for this step.'}</p>{item.sources && <p className="mt-2 pl-7 text-[11px] leading-4 text-teal-200/70">Grounded in: {item.sources}</p>}</article>)}</div></section>
 }
 
 function DuplicateWarning({ ticket }) {
-  const matches = [...(ticket.similar_records || []), ...(ticket.historical_tickets || [])]
+  const matches = [...asArray(ticket?.similar_records), ...asArray(ticket?.historical_tickets)]
     .filter((match, index, all) => all.findIndex((candidate) => candidate.id === match.id) === index)
   if (!matches.length) return null
   return <section className="apple-insight rounded-2xl border border-amber-400/60 bg-amber-950/35 p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-amber-100">AI Similarity &amp; Duplicate Intelligence</h3><p className="mt-1 text-xs leading-5 text-amber-100/75">Matching active work and resolved history are ranked before duplicate or linkage decisions.</p></div><span className="rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-1 text-xs font-bold text-amber-200">{matches.length} match{matches.length === 1 ? '' : 'es'}</span></div><div className="mt-3 space-y-3">{matches.map((match) => { const score = match.score ?? match.relevance_score; const date = match.resolution_date || 'Date not recorded'; const active = !['Closed', 'Resolved', 'Closed Complete', 'Closed Incomplete', 'Closed Skipped'].includes(match.state); return <article key={match.id} className="rounded-xl border border-amber-500/30 bg-slate-950/35 p-3 text-sm text-slate-200"><div className="flex flex-wrap items-center gap-2"><span className="rounded-full border border-amber-400/50 bg-amber-400/10 px-2 py-0.5 text-xs font-bold text-amber-200">{score ?? '—'}% similarity</span><span className={`rounded-full border px-2 py-0.5 text-xs font-semibold ${active ? 'border-cyan-400/40 bg-cyan-500/10 text-cyan-100' : 'border-slate-600 bg-slate-800 text-slate-300'}`}>{active ? 'Ongoing candidate' : 'Resolved history'}</span></div><p className="mt-2 font-medium">{match.id} · {match.title}</p><p className="mt-1 text-xs text-slate-400">State: <span className="font-semibold text-slate-200">{match.state || 'Unknown'}</span> · {active ? 'Active in the queue' : `Resolved: ${date}`}</p>{match.close_notes_snippet && <p className="mt-2 border-l-2 border-amber-400/40 pl-2 text-xs leading-5 text-slate-300">{match.close_notes_snippet}</p>}</article> })}</div></section>
 }
 
 export default function TicketCard({ ticket, onClose, onSelectTicket }) {
+  if (!ticket || typeof ticket !== 'object') return <article className="apple-drawer h-full overflow-y-auto bg-slate-900/95 p-6 text-slate-100"><p className="rounded-xl border border-rose-500/40 bg-rose-950/25 p-4 text-sm text-rose-200">Failed to render component</p></article>
   return <article className="apple-drawer h-full overflow-y-auto bg-slate-900/95 p-6 text-slate-100"><div className="apple-drawer-header mb-7 flex items-start justify-between gap-4"><div><div className="flex flex-wrap items-center gap-2"><p className="font-mono text-sm text-teal-300">{ticket.number || ticket.id} · {ticket.type}</p><HoldReasonBadge ticket={ticket} />{['INC', 'RITM'].includes(ticket.type) && <SlaBadge ticket={ticket} />}<SentimentBadge ticket={ticket} /></div><h2 className="mt-2 text-2xl font-semibold tracking-tight">{ticket.short_description || ticket.title}</h2><p className="mt-3 max-w-xl text-sm leading-6 text-slate-400">{ticket.description}</p><p className="mt-3 text-xs font-medium text-slate-500">Priority {ticket.priority}</p></div>{onClose && <button type="button" onClick={onClose} aria-label="Close ticket details" className="apple-close rounded-full border border-slate-600 px-3 py-1.5 text-sm hover:border-teal-400/60 hover:bg-slate-800">×</button>}</div><div className="space-y-5"><ExecutiveBriefing ticket={ticket} /><DuplicateWarning ticket={ticket} /><TopologyTree ticket={ticket} onSelectTicket={onSelectTicket} /><WorkItemActivities ticket={ticket} /><KnowledgeReferences references={ticket.knowledge_refs} /></div></article>
 }

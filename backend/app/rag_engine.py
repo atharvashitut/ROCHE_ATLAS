@@ -1,4 +1,4 @@
-"""Hybrid Gemini RAG over the canonical ATLAS enterprise corpus.
+"""Hybrid Ollama/Gemini RAG over the canonical ATLAS enterprise corpus.
 
 Retrieval uses a persistent local Chroma collection and Gemini embeddings when
 credentials are configured. Ticket state, journal streams, work notes, task
@@ -7,6 +7,7 @@ evidence, and four connector sources are indexed as independent chunks.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -20,10 +21,10 @@ except ImportError:  # pragma: no cover - optional until requirements are instal
 # CentralTicketRepository.  This keeps RAG usable when this module is invoked
 # directly (for example from a worker or a smoke test), rather than only after
 # FastAPI has imported `main`.
-from .models import MOCK_DB  # noqa: F401
+from .models import MOCK_DB, is_sla_at_risk, is_sla_breached  # noqa: F401
 from .central_db import central_ticket_by_reference, central_ticket_records
 from .connectors import connector_documents, connector_statuses
-from .local_llm import LOCAL_OPEN_SOURCE_GENERATOR
+from .ollama_client import OLLAMA_GENERATOR, OllamaStreamError
 from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, serialize_retrieved
 
 
@@ -141,11 +142,11 @@ def reindex_vector_db() -> None:
     initialize_vector_db()
 
 
-def warm_local_generation() -> None:
-    """Warm cached local weights after startup without delaying API availability."""
+async def diagnose_local_generation() -> None:
+    """Probe the external Ollama service without loading model weights locally."""
 
-    if gemini_client is None:
-        LOCAL_OPEN_SOURCE_GENERATOR.warm_up()
+    await OLLAMA_GENERATOR.diagnose()
+    await OLLAMA_GENERATOR.warm()
 
 
 def _query_terms(text: str) -> set[str]:
@@ -179,7 +180,7 @@ def _has_unmapped_signature(query_text: str) -> bool:
 def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, object]]:
     """Execute hybrid semantic + lexical relevance filtering over vector results."""
 
-    if not query_text.strip() or _has_unmapped_signature(query_text):
+    if not query_text.strip():
         return []
     documents = build_retrieval_documents()
     VECTOR_STORE.sync(documents)
@@ -198,6 +199,11 @@ def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, o
             payload["lexical_hits"] = 1
             selected.append(payload)
             selected_ids.add(document.id)
+    # A direct record reference is authoritative.  Do not pad a ticket deep
+    # dive with adjacent tickets or SOPs simply because they share keywords;
+    # the live canonical record is hydrated separately below.
+    if explicit_tickets:
+        return selected[:selection_limit]
     # Local hash embeddings preserve offline availability but are less precise
     # than Gemini embeddings for narrow SAP terminology. Rank every canonical
     # document lexically first so a procedure containing several exact terms
@@ -261,65 +267,110 @@ def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
     return "\n".join(snapshots)
 
 
-def _grounded_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
-    excerpts = "\n\n".join(f"[{chunk['id']}] {chunk['title']} ({chunk['system']})\n{str(chunk['content'])[:1800]}\nCitation: {chunk['url']}" for chunk in chunks)
-    live_context = _live_ticket_context(chunks)
-    ticket_status = is_ticket_status_request(query_text)
-    intent_instruction = (
-        "The user explicitly requested a ticket update. Explain that ticket's current situation, impact, latest human update, and next best action in plain English. "
-        if ticket_status else
-        "This is a general question or SOP request. Answer only what the user asked in plain conversational English or simple numbered steps. "
-        "Do not use Ticket overview, What is happening, Latest update, or Recommended actions headings. "
-    )
+def _grounded_prompt(
+    query_text: str,
+    chunks: list[dict[str, object]],
+    *,
+    operational_context: str = "",
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    """Build evidence for generation without prescribing a response template."""
+
+    excerpts = _procedural_markdown_context(chunks)
+    # Prior model answers can be several thousand characters each. Bound the
+    # transcript before local CPU inference so a follow-up remains responsive
+    # while retaining the most recent conversational intent.
+    transcript_lines: list[str] = []
+    for item in (history or [])[-4:]:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join(str(item.get("text", "")).split())
+        if len(text) > 360:
+            text = f"{text[:357].rstrip()}…"
+        if text:
+            transcript_lines.append(f"{str(item.get('role', 'user')).title()}: {text}")
+    transcript = "\n".join(transcript_lines)
     return (
-        "You are ATLAS, an expert SAP Copilot. Answer only what the user specifically asks. "
-        "Reply in the same language as the user whenever the configured model can do so. Speak naturally in plain text paragraphs or simple numbered lists. Do not use generic ticket headers or structural templates unless the user asked for a ticket status. "
-        "Answer only from the internal evidence below, and do not sound like a field dump or API response. "
-        f"{intent_instruction}"
-        "When retrieved evidence is a SUD or SOP, provide a complete, step-by-step technical procedure. Include every relevant prerequisite, SAP transaction, approval role, control, and remediation step present in the retrieved context. Never truncate it into a one-line summary unless the user explicitly asks for a brief answer. "
-        "Call out approval, GxP, rollback, or escalation gates only when the evidence requires them. "
-        "Do not recite raw labels, every field, or JSON-style key/value data. Never use hyphen characters as list markers or separators. "
-        "When a source is relevant, mention its title naturally in the sentence rather than outputting source IDs, URLs, or UI instructions. Do not invent source details.\n\n"
-        f"Question: {query_text}\n\nLive ServiceNow ticket state from MOCK_DB:\n{live_context}\n\nEnterprise evidence:\n{excerpts}"
+        f"User question:\n{query_text}\n\n"
+        f"Recent conversation (optional context):\n{transcript or 'None'}\n\n"
+        f"Live operational context:\n{operational_context or _live_ticket_context(chunks) or 'No directly matched live record.'}\n\n"
+        f"Retrieved enterprise evidence:\n{excerpts or 'No internal document matched. Use general expertise and clearly distinguish assumptions.'}"
     )
+
+
+def _procedural_markdown_context(chunks: list[dict[str, object]], *, max_characters: int = 1500) -> str:
+    """Return a small, readable SOP payload instead of vector-store metadata.
+
+    Ticket chunks are deliberately excluded: their human-facing fields are
+    supplied by the dedicated canonical ticket formatter.  This avoids
+    repeating journal text, IDs, and derived vector metadata in the prompt.
+    """
+
+    sections: list[str] = []
+    remaining = max_characters
+    for chunk in chunks:
+        if chunk.get("record_type") != "knowledge" or remaining <= 0:
+            continue
+        title = str(chunk.get("title") or "Enterprise procedure").strip()
+        content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
+        if not content:
+            continue
+        heading = f"### {title}\n"
+        available = max(0, remaining - len(heading))
+        if available <= 0:
+            break
+        truncated = len(content) > available
+        excerpt = content[:available].rstrip()
+        if truncated:
+            # Reserve the final character for the truncation marker so the
+            # complete Markdown evidence block never exceeds its budget.
+            excerpt = f"{excerpt[:max(0, available - 1)].rstrip()}…"
+        section = f"{heading}{excerpt}"
+        sections.append(section)
+        remaining -= len(section) + 2
+    return "\n\n".join(sections)
 
 
 def _fallback_prompt(query_text: str) -> str:
     return (
-        "No relevant internal enterprise evidence was retrieved. You are ATLAS, an expert SAP Copilot. "
-        "Answer only what the user specifically asks in plain conversational English or simple numbered steps. "
-        "Do not use generic ticket headers or structural templates unless the user asked for a ticket status. "
-        "Provide a safe diagnostic hypothesis, evidence collection steps, a rollback-aware investigation plan, and escalation criteria when relevant. "
-        "Do not claim internal documents support the answer.\n\n"
-        f"Question: {query_text}"
+        f"User question:\n{query_text}\n\n"
+        "No internal evidence was retrieved. Use general SAP and ITIL expertise, state uncertainty where relevant, and do not claim an internal source supports the answer."
     )
 
 
-def _local_generation_prompt(query_text: str, chunks: list[dict[str, object]]) -> str:
-    """Keep local CPU generation focused enough to meet the Chat response budget."""
+def _local_generation_prompt(
+    query_text: str,
+    chunks: list[dict[str, object]],
+    *,
+    operational_context: str = "",
+    history: list[dict[str, str]] | None = None,
+) -> str:
+    """Return a complete grounded prompt for the process-external model."""
 
-    # Keep CPU inference practical inside the protected interactive budget.
-    # The complete vector evidence remains available to the deterministic
-    # synthesizer; the optional local model receives only the two strongest
-    # compact excerpts.
-    evidence = "\n\n".join(
-        f"{chunk['title']} ({chunk['system']}): {str(chunk['content'])[:360]}"
-        for chunk in chunks[:2]
-    )
-    live_context = _live_ticket_context(chunks[:1])[:360]
-    ticket_status = is_ticket_status_request(query_text)
-    intent_instruction = (
-        "The user asked for a ticket update; give only the relevant current status, latest update, and next action. "
-        if ticket_status else
-        "This is a general question; answer directly without Ticket overview, What is happening, Latest update, or Recommended actions headings. "
+    return _grounded_prompt(
+        query_text,
+        chunks,
+        operational_context=operational_context,
+        history=history,
+    ) if chunks or operational_context else _fallback_prompt(query_text)
+
+
+def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False) -> str:
+    """Shared system envelope for Gemini and local Ollama synthesis."""
+
+    concise_instruction = (
+        " For a normal operational question, answer directly in no more than six short bullets or three short paragraphs. "
+        "Only provide a long procedure when the user explicitly requests a complete, detailed, or step-by-step answer."
+        if concise else
+        " For an explicitly complete procedural request, preserve all relevant prerequisites, approvals, transaction codes, and validation steps."
     )
     return (
-        "You are ATLAS, an expert SAP Copilot. Answer only the user's question from this small set of ATLAS evidence. "
-        "Reply in the same language as the user. For a SUD or SOP question, provide complete numbered steps from the supplied evidence; do not compress them into a one-line answer unless the user asks for a summary. "
-        f"{intent_instruction}"
-        "Do not display raw fields, journals, topology, source IDs, URLs, or debug metadata.\n\n"
-        f"Question: {query_text}\n\nLive ticket context:\n{live_context}\n\nEvidence:\n{evidence}"
-    ) if chunks else _fallback_prompt(query_text)
+        "You are ATLAS, a senior SAP and GxP operations copilot. Use supplied live data and enterprise evidence as factual grounding. "
+        "Answer the user's actual request in the style, tone, language, length, and format they ask for; you may summarize, explain, write creatively, or use bullets when useful. "
+        "Do not invent operational facts or numeric values not supported by the context. When context is incomplete, say what is uncertain. "
+        "You may cite a relevant supplied document link naturally when it improves the answer, but do not force citations or a fixed response template."
+        f"{concise_instruction}"
+    )
 
 
 def _is_how_to_question(query_text: str) -> bool:
@@ -436,11 +487,10 @@ def _workload_answer(scope_name: str, tickets: list[Any]) -> tuple[str, list[str
     """Answer live people/team workload questions without requiring an LLM."""
 
     active = [ticket for ticket in tickets if not _is_closed(ticket)]
-    breached = [ticket for ticket in active if ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0)]
+    breached = [ticket for ticket in active if is_sla_breached(ticket)]
     at_risk = [
         ticket for ticket in active
-        if ticket not in breached and ticket.type in {"INC", "RITM"}
-        and (ticket.sla_status == "AT_RISK" or (ticket.sla_time_remaining is not None and 0 < ticket.sla_time_remaining <= 90))
+        if ticket not in breached and is_sla_at_risk(ticket)
     ]
     priority_rank = {"1 - Critical": 1, "2 - High": 2, "3 - Moderate": 3, "4 - Low": 4}
     ordered = sorted(active, key=lambda ticket: (
@@ -494,6 +544,15 @@ def _live_stats_snapshot(query_text: str, *, active_only: bool = True) -> dict[s
     groups = _mentioned_assignment_groups(query_text)
     assignees = _mentioned_assignees(query_text)
     modules = sorted(_requested_sap_modules(query_text))
+    filters = _dashboard_query_filters(query_text)
+    priority_names = {
+        1: "1 - Critical",
+        2: "2 - High",
+        3: "3 - Moderate",
+        4: "4 - Low",
+    }
+    priorities = [priority_names[rank] for rank in sorted(filters["priority_ranks"]) if rank in priority_names]
+    exclude_on_hold = bool(re.search(r"\b(?:exclude|excluding|without|not)\s+on[ -]?hold\b", query_text.casefold()))
     return get_dashboard_stats(
         assignment_group=groups,
         group_filter_active=bool(groups),
@@ -502,6 +561,8 @@ def _live_stats_snapshot(query_text: str, *, active_only: bool = True) -> dict[s
         start_date=None,
         end_date=None,
         active_only=active_only,
+        priority=priorities,
+        exclude_on_hold=exclude_on_hold,
     )
 
 
@@ -543,6 +604,7 @@ def _stats_context_block(stats: dict[str, Any]) -> str:
         f"SLA breached: {sla_segments.get('Breached', 0)}",
         f"SLA at risk: {sla_segments.get('At Risk', 0)}",
         f"SLA on track: {sla_segments.get('On Track', 0)}",
+        f"SLA compliance percentage: {round((sla_segments.get('On Track', 0) / max(1, sla_segments.get('Breached', 0) + sla_segments.get('At Risk', 0) + sla_segments.get('On Track', 0))) * 100)}",
         f"Awaiting caller: {summary['awaiting_caller']}",
         f"Awaiting change: {summary['awaiting_change']}",
         f"Awaiting child: {summary['awaiting_child']}",
@@ -563,13 +625,19 @@ def _stats_chart_payload(stats: dict[str, Any]) -> dict[str, object]:
         if segment["label"] != "No SLA (PRB/CHG)"
     ]
     work_state_data = [dict(segment) for segment in stats["work_state_breakdown"]]
+    tracked = sum(int(item["value"]) for item in sla_data)
+    compliant = int(next((item["value"] for item in sla_data if item["label"] == "On Track"), 0))
     return {
         "type": "dashboard_summary",
         "title": f"Live operational snapshot — {scope}",
+        "categories": [item["label"] for item in sla_data],
+        "series": [{"name": "SLA-tracked records", "data": [int(item["value"]) for item in sla_data]}],
         "metrics": [
             {"label": "Total scope", "value": int(summary["total_tickets"]), "color": "#38bdf8"},
             {"label": "SLA breached", "value": int(summary["breached"]), "color": "#ef4444"},
             {"label": "At risk", "value": int(next((item["value"] for item in sla_data if item["label"] == "At Risk"), 0)), "color": "#f59e0b"},
+            {"label": "In compliance", "value": compliant, "color": "#10b981"},
+            {"label": "Compliance", "value": round((compliant / tracked) * 100) if tracked else 0, "suffix": "%", "color": "#14b8a6"},
             {"label": "On hold", "value": int(summary["on_hold"]), "color": "#a78bfa"},
         ],
         "charts": [
@@ -594,6 +662,8 @@ def _stats_answer(
     eligible = sla_segments.get("Breached", 0) + sla_segments.get("At Risk", 0) + sla_segments.get("On Track", 0)
     breached = sla_segments.get("Breached", 0)
     breach_rate = round((breached / eligible) * 100) if eligible else 0
+    compliance_count = sla_segments.get("On Track", 0)
+    compliance_rate = round((compliance_count / eligible) * 100) if eligible else 0
     listed = [str(ticket["number"]) for ticket in stats.get("ticket_index", [])]
     # Read the scope from the exact serialized snapshot supplied to this
     # deterministic synthesizer. The numerical values below come from the
@@ -649,14 +719,14 @@ def _stats_answer(
                 f"SLA Health — {scope}",
                 "",
                 "Current Position",
-                f"• Active work items: {active_total}.",
-                f"• SLA-tracked incidents and requests: {eligible}.",
-                f"• Current breach rate: {breach_rate}%.",
+                f"• Total tracked records: {eligible}.",
+                f"• In compliance: {compliance_count} ({compliance_rate}%).",
+                f"• At risk: {sla_segments.get('At Risk', 0)}.",
+                f"• Breached: {breached} ({breach_rate}%).",
+                f"• Active work items in scope: {active_total}.",
                 "",
                 "SLA Breakdown",
-                f"• Breached: {breached}.",
-                f"• At risk: {sla_segments.get('At Risk', 0)}.",
-                f"• On track: {sla_segments.get('On Track', 0)}.",
+                f"• On track / in compliance: {compliance_count}.",
             ]),
             listed,
         )
@@ -831,11 +901,7 @@ def _ticket_priority_rank(ticket: Any) -> int:
 
 
 def _is_at_risk(ticket: Any) -> bool:
-    return (
-        ticket.type in {"INC", "RITM"}
-        and not (ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0))
-        and (str(ticket.sla_status).upper() == "AT_RISK" or (ticket.sla_time_remaining is not None and 0 < ticket.sla_time_remaining <= 90))
-    )
+    return is_sla_at_risk(ticket)
 
 
 def _dashboard_filtered_tickets(query_text: str) -> tuple[list[Any], dict[str, object]]:
@@ -977,6 +1043,11 @@ def _is_breached_ticket_list_request(query_text: str, history: list[dict[str, st
     """Recognise a direct or contextual request to enumerate SLA breaches."""
 
     query = query_text.casefold()
+    # A quantified SLA question is an executive metric, not an enumeration.
+    # Keep it on the canonical Stats + chart route even when it contains the
+    # words "what", "tickets", and "breached".
+    if re.search(r"\b(?:how\s+many|count|number\s+of|total)\b", query):
+        return False
     mentions_breach = "breach" in query
     # Direct requests such as "Breached tickets in Basis" omit a leading
     # interrogative, but the plural record noun still unambiguously asks for a
@@ -1423,36 +1494,6 @@ def _local_answer(query_text: str, chunks: list[dict[str, object]]) -> str:
     )
 
 
-def compose_conversational_ticket_response(ticket: Any, query_text: str, grounded_answer: str) -> str:
-    """Turn a live ServiceNow record into a readable co-pilot update.
-
-    The ticket is already hydrated from the canonical repository. This keeps
-    specific-ticket chat answers current without turning the response into a
-    raw schema dump.
-    """
-
-    latest_comment = ticket.comments[-1].value if ticket.comments else "there is no recent customer-visible journal update"
-    hold_reason = getattr(ticket, "hold_reason", None) if ticket.state == "On Hold" else None
-    situation = f"{ticket.short_description} is the main issue."
-    if hold_reason:
-        situation += f" Progress is currently paused because the record is waiting on {hold_reason.lower()}."
-    elif ticket.state in {"Resolved", "Closed", "Closed Complete"}:
-        situation += " The record is in a closure-oriented state, so the focus is on confirming the business outcome and evidence."
-    else:
-        situation += " The support team is actively working the recovery path."
-    next_move = (ticket.ai_resolution_guide or "Validate the current evidence, coordinate the owning team, and confirm the outcome with the requester.").split(". ")[0].rstrip(".")
-    attribution = next((line for line in grounded_answer.splitlines() if line.startswith("This guidance is grounded in ")), "")
-    return (
-        f"{ticket.number} is currently {ticket.state}. {situation}\n\n"
-        f"Latest update: {latest_comment}\n\n"
-        "Next steps\n"
-        f"1. {next_move}.\n"
-        "2. Confirm the current business impact and any dependency with the owning team.\n"
-        "3. Validate the outcome with the requester and record the evidence before closure."
-        + (f"\n\n{attribution}" if attribution else "")
-    )
-
-
 def _sources(chunks: list[dict[str, object]]) -> list[dict[str, object]]:
     seen: set[str] = set()
     sources: list[dict[str, object]] = []
@@ -1496,160 +1537,286 @@ def _add_natural_source_attribution(answer: str, chunks: list[dict[str, object]]
     return answer
 
 
-def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    """Retrieve evidence, then prefer Gemini or local open-source synthesis."""
+def _journal_value(entry: Any) -> tuple[str, str, str]:
+    """Extract only display-safe journal data from Pydantic, dict, or string input."""
+
+    if isinstance(entry, str):
+        return "", "", entry.strip()
+    if isinstance(entry, dict):
+        return (
+            str(entry.get("sys_created_on") or entry.get("timestamp") or "").strip(),
+            str(entry.get("sys_created_by") or entry.get("author") or "").strip(),
+            str(entry.get("value") or entry.get("text") or "").strip(),
+        )
+    return (
+        str(getattr(entry, "sys_created_on", "") or getattr(entry, "timestamp", "")).strip(),
+        str(getattr(entry, "sys_created_by", "") or getattr(entry, "author", "")).strip(),
+        str(getattr(entry, "value", "") or getattr(entry, "text", "")).strip(),
+    )
+
+
+def _latest_journal_lines(entries: list[Any] | None, *, limit: int = 3, empty_label: str) -> list[str]:
+    """Return the most recent human-readable journal entries, newest first."""
+
+    normalized = [_journal_value(entry) for entry in (entries or [])]
+    normalized = [entry for entry in normalized if entry[2]]
+    normalized.sort(key=lambda entry: entry[0], reverse=True)
+    if not normalized:
+        return [empty_label]
+    lines = []
+    for created_on, author, value in normalized[:limit]:
+        prefix = " · ".join(part for part in (created_on, author) if part)
+        lines.append(f"- {prefix + ': ' if prefix else ''}{value}")
+    return lines
+
+
+def _sla_summary(ticket: Any) -> str:
+    """Create a compact canonical SLA label without null fields or aliases."""
+
+    remaining = getattr(ticket, "sla_time_remaining", None)
+    if remaining is None:
+        return "Not SLA-tracked"
+    health = str(getattr(ticket, "sla_health", "") or getattr(ticket, "sla_status", "") or "Unknown")
+    if bool(getattr(ticket, "is_breached", False)) or remaining <= 0:
+        return f"Breached ({abs(remaining)}m overdue)"
+    return f"{health} ({remaining}m remaining)"
+
+
+def _single_ticket_deep_dive(ticket: Any) -> str:
+    """Bounded human-only context for one explicitly referenced ServiceNow record."""
+
+    fields = (
+        ("Number", getattr(ticket, "number", "")),
+        ("Short description", getattr(ticket, "short_description", "")),
+        ("Full description", getattr(ticket, "description", "")),
+        ("Priority", getattr(ticket, "priority", "")),
+        ("State", getattr(ticket, "state", "")),
+        ("Assignee", getattr(ticket, "assigned_to", "") or getattr(ticket, "assignee", "")),
+        ("Caller", getattr(ticket, "caller_id", "") or getattr(ticket, "requested_for", "")),
+        ("SLA status", _sla_summary(ticket)),
+    )
+    lines = ["## Canonical ticket deep dive"]
+    lines.extend(f"{label}: {value}" for label, value in fields if value not in (None, "", [], {}))
+    lines.append("### Three most recent work notes")
+    lines.extend(_latest_journal_lines(getattr(ticket, "work_notes", None), empty_label="- No work notes recorded."))
+    lines.append("### Three most recent comments")
+    lines.extend(_latest_journal_lines(getattr(ticket, "comments", None), empty_label="- No comments recorded."))
+    return "\n".join(lines)
+
+
+def _ticket_queue_summary(tickets: list[Any], *, label: str) -> str:
+    """Bound queue context to five dense, four-line ServiceNow summaries."""
+
+    if not tickets:
+        return f"{label}: no matching canonical ServiceNow records were found."
+    lines = [f"{label}: {len(tickets)} matching canonical ServiceNow record(s); first {min(5, len(tickets))} shown for generation."]
+    for index, ticket in enumerate(tickets[:5], start=1):
+        work_note = _latest_journal_lines(
+            getattr(ticket, "work_notes", None), limit=1, empty_label="No work note recorded."
+        )[0].removeprefix("- ")
+        lines.extend((
+            f"{index}. {ticket.number} — {ticket.short_description}",
+            f"   Priority: {ticket.priority} | State: {ticket.state} | Assignee: {ticket.assigned_to or ticket.assignee or 'Unassigned'}",
+            f"   SLA: {_sla_summary(ticket)}",
+            f"   Latest work note: {work_note}",
+        ))
+    if len(tickets) > 5:
+        lines.append(f"{len(tickets) - 5} additional matching records are intentionally omitted from context to stay within the CPU generation budget.")
+    return "\n".join(lines)
+
+
+def _operational_ticket_context(tickets: list[Any], *, label: str, deep_dive: bool = False) -> str:
+    """Serialize canonical records as bounded grounding context, never as a response."""
+
+    if deep_dive:
+        return _single_ticket_deep_dive(tickets[0]) if tickets else f"{label}: no matching canonical ServiceNow record was found."
+    return _ticket_queue_summary(tickets, label=label)
+
+
+def _deterministic_failure_response(query_text: str, chunks: list[dict[str, object]], operational_context: str) -> str:
+    """Last-resort response; callers use this only after generation fails."""
+
+    base = _local_answer(query_text, chunks)
+    if operational_context:
+        return f"The generation service is temporarily unavailable. Retrieved operational context:\n\n{operational_context}\n\n{base}"
+    return base
+
+
+
+def _generation_token_budget(query_text: str) -> int:
+    """Keep normal interactive answers responsive without truncating deep SOPs."""
+
+    standard = max(100, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "220")))
+    needs_procedure_depth = _is_knowledge_procedure_request(query_text) and bool(re.search(
+        r"\b(?:complete|comprehensive|detailed|full|step[ -]?by[ -]?step)\b",
+        query_text.casefold(),
+    ))
+    if needs_procedure_depth:
+        return max(standard, int(os.getenv("ATLAS_OLLAMA_DEEP_MAX_TOKENS", "1100")))
+    if _is_knowledge_procedure_request(query_text):
+        return max(standard, min(650, int(os.getenv("ATLAS_OLLAMA_PROCEDURE_MAX_TOKENS", "650"))))
+    return standard
+
+
+def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """Prepare one read-only RAG execution plan for JSON or SSE delivery."""
 
     chunks = retrieve_vector_context(query_text)
-    has_internal_match = bool(chunks)
-    prompt = _grounded_prompt(query_text, chunks) if has_internal_match else _fallback_prompt(query_text)
-    knowledge_procedure_intent = _is_knowledge_procedure_request(query_text)
-    ticket_list_intent = not knowledge_procedure_intent and is_active_ticket_list_request(query_text)
-    listed_ticket_ids: list[str] = []
+    dashboard_filters = _dashboard_query_filters(query_text)
+    direct_ticket_ids = _explicit_ticket_numbers(query_text)
+    direct_tickets = [
+        ticket for ticket_id in direct_ticket_ids
+        if (ticket := central_ticket_records().get(ticket_id)) is not None
+    ]
     assignees = _mentioned_assignees(query_text)
     groups = _mentioned_assignment_groups(query_text)
     modules = _requested_sap_modules(query_text)
-    sla_health_request = _is_sla_health_question(query_text)
-    operational_scope_intent = False
-    chart_data: dict[str, object] | None = None
-    stats_context: str | None = None
-    direct_ticket_ids = _explicit_ticket_numbers(query_text)
-    direct_ticket = next((central_ticket_records().get(ticket_id) for ticket_id in direct_ticket_ids if ticket_id in central_ticket_records()), None)
-    # A module-specific queue question is a scoped operational lookup.  Keep
-    # it on the list path even when phrased as "how many", so the response
-    # provides both the truthful count and the records behind that count.
-    module_queue_intent = not knowledge_procedure_intent and bool(modules) and bool(
-        re.search(r"\b(tickets?|incidents?|queue|work items?)\b", query_text.casefold())
-    )
-    # A module queue request (for example, "how many PLM tickets are in the
-    # queue") is handled by the ticket-list path so it returns the actual
-    # matching work items rather than unrelated global metrics.
-    breach_list_intent = _is_breached_ticket_list_request(query_text, history)
-    dashboard_filters = _dashboard_query_filters(query_text)
-    # A dashboard-level SLA health question is the explicit executive-chart
-    # request. Other broad knowledge or general metric questions stay text
-    # only unless a named group, assignee, or SAP module asks for SLA health
-    # or at-risk work.
-    dashboard_sla_chart_intent = (
-        not knowledge_procedure_intent
-        and sla_health_request
-        and "dashboard" in query_text.casefold()
-    )
-    scoped_health_visual_intent = (
-        not knowledge_procedure_intent
-        and (
-            (bool(assignees or groups or modules) and (sla_health_request or str(dashboard_filters["sla_mode"]) == "at_risk"))
-            or dashboard_sla_chart_intent
-        )
-    )
-    has_refining_filter = any((
-        dashboard_filters["sla_mode"], dashboard_filters["record_types"], dashboard_filters["states"],
-        dashboard_filters["hold_reasons"], dashboard_filters["priority_ranks"],
+    queue_language = bool(re.search(r"\b(?:tickets?|incidents?|requests?|problems?|changes?|queue|work items?|records?|workload)\b", query_text.casefold()))
+    filter_present = any((
+        dashboard_filters["modules"], dashboard_filters["groups"], dashboard_filters["assignees"],
+        dashboard_filters["record_types"], dashboard_filters["states"], dashboard_filters["hold_reasons"],
+        dashboard_filters["priority_ranks"], dashboard_filters["sla_mode"],
     ))
-    # Preserve the richer existing assignee and group workload briefs for a
-    # simple person/team lookup. A second natural-language filter such as
-    # "at-risk", "P1", or "Awaiting Vendor" routes through the reusable
-    # canonical field filter instead.
-    dashboard_filter_intent = not scoped_health_visual_intent and not knowledge_procedure_intent and _is_dashboard_filter_request(query_text) and (
-        not (assignees or groups or modules) or has_refining_filter
-    )
-    stats_intent = (
-        _is_metrics_intent(query_text)
-        and direct_ticket is None
-        and not ticket_list_intent
-        and not module_queue_intent
-        and not breach_list_intent
-        and not dashboard_filter_intent
-        and not knowledge_procedure_intent
-        and not assignees
-        and not groups
-        and not modules
-    )
-    live_metric_intent = stats_intent or scoped_health_visual_intent
-    if direct_ticket is not None:
-        answer = _ticket_answer(direct_ticket)
-        listed_ticket_ids = [direct_ticket.number]
-        operational_scope_intent = True
-        intent = "direct_ticket"
-    elif scoped_health_visual_intent:
+
+    scoped_tickets: list[Any] = list(direct_tickets)
+    if not scoped_tickets and (queue_language or filter_present) and (filter_present or assignees or groups or modules):
+        scoped_tickets, _ = _dashboard_filtered_tickets(query_text)
+
+    metrics_requested = _is_metrics_intent(query_text)
+    sla_visual_requested = _is_sla_health_question(query_text) or str(dashboard_filters["sla_mode"]) in {"at_risk", "breached", "on_track", "non_breached"}
+    stats_context: str | None = None
+    chart_data: dict[str, object] | None = None
+    if metrics_requested:
         live_stats = _live_stats_snapshot(query_text, active_only=True)
         stats_context = _stats_context_block(live_stats)
-        answer, listed_ticket_ids = _stats_answer(query_text, live_stats, stats_context)
-        chart_data = _stats_chart_payload(live_stats)
-        operational_scope_intent = True
-        intent = "scoped_sla_health"
-    elif dashboard_filter_intent:
-        answer, listed_ticket_ids = _dashboard_filtered_answer(query_text)
-        operational_scope_intent = True
-        intent = "dashboard_filtered_list"
-    elif breach_list_intent:
-        answer, listed_ticket_ids = _breached_ticket_list_answer(query_text)
-        operational_scope_intent = True
-        intent = "breached_ticket_list"
-    elif assignees:
-        assignee = assignees[0]
-        scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assigned_to == assignee]
-        answer, listed_ticket_ids = _workload_answer(assignee, scoped_tickets)
-        intent = "assignee_workload"
-        operational_scope_intent = True
-    elif groups:
-        group = groups[0]
-        scoped_tickets = [ticket for ticket in central_ticket_records().values() if ticket.assignment_group == group]
-        answer, listed_ticket_ids = _workload_answer(group, scoped_tickets)
-        intent = "assignment_group_workload"
-        operational_scope_intent = True
-    elif stats_intent:
-        live_stats = _live_stats_snapshot(query_text, active_only=sla_health_request)
-        stats_context = _stats_context_block(live_stats)
-        answer, listed_ticket_ids = _stats_answer(query_text, live_stats, stats_context)
-        operational_scope_intent = True
-        intent = "live_stats"
-    elif ticket_list_intent or module_queue_intent:
-        answer, listed_ticket_ids = _active_ticket_list_answer(query_text)
-        intent = "active_ticket_list"
-    else:
-        answer = _local_answer(query_text, chunks)
-        intent = "conversational_guidance"
-    model_used = (
-        "live-stats-deterministic" if live_metric_intent
-        else "live-dashboard-filter-deterministic" if dashboard_filter_intent
-        else "canonical-ticket-deterministic" if direct_ticket is not None
-        else "local-grounded-fallback"
+        if sla_visual_requested:
+            chart_data = _stats_chart_payload(live_stats)
+
+    ticket_context = _operational_ticket_context(
+        scoped_tickets,
+        label="Exact ticket match" if direct_tickets else "Live canonical queue filter",
+        deep_dive=bool(direct_tickets),
+    ) if scoped_tickets else ""
+    operational_context = "\n\n".join(part for part in (stats_context, ticket_context) if part)
+    prompt = _local_generation_prompt(
+        query_text,
+        chunks,
+        operational_context=operational_context,
+        history=history,
     )
-    if gemini_client is not None and not ticket_list_intent and not operational_scope_intent:
-        try:
-            generated = gemini_client.models.generate_content(model=GENERATION_MODEL, contents=prompt)
-            if generated.text:
-                answer, model_used = generated.text, GENERATION_MODEL
-        except Exception:
-            pass
-    elif not ticket_list_intent and not operational_scope_intent and not _has_authoritative_playbook(query_text):
-        local_answer = LOCAL_OPEN_SOURCE_GENERATOR.generate(_local_generation_prompt(query_text, chunks))
-        if local_answer:
-            answer = local_answer
-            model_used = f"local:{LOCAL_OPEN_SOURCE_GENERATOR.model_id}"
-    if has_internal_match and not ticket_list_intent and not operational_scope_intent:
-        answer = _add_natural_source_attribution(answer, chunks, query_text)
-    ticket_ids = []
+
+    ticket_ids: list[str] = []
     for chunk in chunks:
         ticket_id = str(chunk.get("ticket_id") or chunk.get("ticket_number") or "").upper()
         if ticket_id in central_ticket_records() and ticket_id not in ticket_ids:
             ticket_ids.append(ticket_id)
-    for ticket_id in listed_ticket_ids:
-        if ticket_id in central_ticket_records() and ticket_id not in ticket_ids:
-            ticket_ids.append(ticket_id)
+    for ticket in scoped_tickets:
+        if ticket.number not in ticket_ids:
+            ticket_ids.append(ticket.number)
+
+    intent = "direct_ticket" if direct_tickets else "live_ticket_context" if scoped_tickets else "live_stats_context" if metrics_requested else "vector_grounded_rag"
+    generation_max_tokens = _generation_token_budget(query_text)
     return {
-        "answer": answer, "sources": _sources(chunks), "model_used": model_used,
-        "embedding_model": VECTOR_STORE.status()["embedding_model"],
-        "fallback_reasoning": not has_internal_match and not operational_scope_intent,
-        "retrieval_route": "live_stats" if live_metric_intent else "canonical_dashboard_filter" if dashboard_filter_intent else "canonical_ticket" if direct_ticket is not None else "vector_grounded_rag" if has_internal_match else "gemini_itil_reasoning",
-        "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
+        "query_text": query_text,
+        "chunks": chunks,
+        "prompt": prompt,
+        "system_prompt": _synthesis_system_prompt(
+            metric_mode=metrics_requested,
+            concise=generation_max_tokens <= 300,
+        ),
+        "max_tokens": generation_max_tokens,
+        "operational_context": operational_context,
         "ticket_ids": ticket_ids,
         "intent": intent,
-        "listed_ticket_ids": listed_ticket_ids,
-        # Included for the API contract and diagnostics; it is derived solely
-        # from the central Stats calculation and is not persisted anywhere.
+        "listed_ticket_ids": [ticket.number for ticket in scoped_tickets],
         "stats_context": stats_context,
         "chart_data": chart_data,
+        "sources": _sources(chunks),
+        "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
+        "retrieval_route": "vector_plus_live_context" if operational_context else "vector_grounded_rag" if chunks else "general_reasoning",
+    }
+
+
+def hybrid_rag_metadata(plan: dict[str, Any]) -> dict[str, Any]:
+    """Return response metadata before a streaming generation begins."""
+
+    return {
+        "sources": plan["sources"],
+        "embedding_model": VECTOR_STORE.status()["embedding_model"],
+        "retrieval_route": plan["retrieval_route"],
+        "retrieval": plan["retrieval"],
+        "ticket_ids": plan["ticket_ids"],
+        "intent": plan["intent"],
+        "listed_ticket_ids": plan["listed_ticket_ids"],
+        "stats_context": plan["stats_context"],
+        "chart_data": plan["chart_data"],
+    }
+
+
+async def stream_hybrid_rag(plan: dict[str, Any]):
+    """Yield model deltas; leave transport framing to the FastAPI route."""
+
+    try:
+        async for content, model in OLLAMA_GENERATOR.stream_generate(
+            system_prompt=str(plan["system_prompt"]),
+            user_prompt=str(plan["prompt"]),
+            max_tokens=int(plan["max_tokens"]),
+        ):
+            yield {"type": "token", "content": content, "model_used": f"ollama:{model}"}
+    except OllamaStreamError as error:
+        # A generated fallback remains read-only and is intentionally sent as
+        # a token after an error event, keeping the SSE connection usable.
+        yield {"type": "error", "message": "Local generation is temporarily unavailable.", "detail": str(error)}
+        yield {
+            "type": "token",
+            "content": _deterministic_failure_response(
+                str(plan["query_text"]), list(plan["chunks"]), str(plan["operational_context"])
+            ),
+            "model_used": "ollama-unavailable",
+        }
+
+
+async def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """Ground every query, then send every healthy request to Ollama."""
+
+    plan = prepare_hybrid_rag(query_text, history)
+    generated, model = await OLLAMA_GENERATOR.generate(
+        system_prompt=str(plan["system_prompt"]),
+        user_prompt=str(plan["prompt"]),
+        max_tokens=int(plan["max_tokens"]),
+    )
+    engine_failed = not bool(generated)
+    if generated:
+        answer = generated
+        model_used = f"ollama:{model}"
+    elif gemini_client is not None:
+        # Optional secondary engine, preserved for configured deployments. It
+        # is attempted only after the local Ollama execution path fails.
+        try:
+            fallback = await asyncio.to_thread(
+                gemini_client.models.generate_content,
+                model=GENERATION_MODEL,
+                contents=f"{plan['system_prompt']}\n\n{plan['prompt']}",
+            )
+            if fallback.text:
+                answer = fallback.text
+                model_used = GENERATION_MODEL
+                engine_failed = False
+            else:
+                answer = _deterministic_failure_response(query_text, list(plan["chunks"]), str(plan["operational_context"]))
+                model_used = "ollama-unavailable"
+        except Exception:
+            answer = _deterministic_failure_response(query_text, list(plan["chunks"]), str(plan["operational_context"]))
+            model_used = "ollama-unavailable"
+    else:
+        answer = _deterministic_failure_response(query_text, list(plan["chunks"]), str(plan["operational_context"]))
+        model_used = "ollama-unavailable"
+
+    return {
+        "answer": answer,
+        **hybrid_rag_metadata(plan),
+        "model_used": model_used,
+        "fallback_reasoning": engine_failed,
     }
 
 
@@ -1661,13 +1828,13 @@ def rag_status() -> dict[str, object]:
         "vector_store": VECTOR_STORE.status(),
         "connectors": connector_statuses(),
         "generation": {
-            "provider": "Google Gemini",
-            "configured": gemini_client is not None,
-            "api_key_environment": "GEMINI_API_KEY",
-            "model": GENERATION_MODEL,
-            "fallback": "local-grounded-fallback",
+            "primary_provider": "Ollama local daemon",
+            "ollama": OLLAMA_GENERATOR.status(),
+            "gemini_configured": gemini_client is not None,
+            "gemini_api_key_environment": "GEMINI_API_KEY",
+            "gemini_model": GENERATION_MODEL,
+            "fallback": "deterministic-grounded-synthesis",
         },
-        "local_generation": LOCAL_OPEN_SOURCE_GENERATOR.status(),
     }
 
 
