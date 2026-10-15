@@ -200,7 +200,7 @@ The following content is dynamically read at request time from canonical backend
 Current PoC limitations must remain explicit:
 
 1. `MOCK_DB` and `CENTRAL_KNOWLEDGE_DB` are manually authored demo data. They are canonical inside ATLAS, but not live ServiceNow/Veeva/ALM/Drive data yet.
-2. Qwen is **not trained or fine-tuned** on the ATLAS corpus. It is a base local model grounded at runtime through retrieval. Gemini remains an optional future provider.
+2. The approved local Llama model is **not trained or fine-tuned** on the ATLAS corpus. It is grounded at runtime through retrieval. Gemini remains an optional future provider.
 3. `rag_engine.py` contains deterministic intent rules and response-formatting helpers. In particular, known high-value SOP topics have curated action sequences to preserve accuracy when an LLM is unavailable or exceeds its timeout. These are code templates, not learned model output.
 4. The Chat welcome text and CR/RCA quick-action labels are UI text constants only; they are not operational data.
 5. The vector index is used for evidence retrieval, never as authority for current ticket state. Ticket/Stats answers must always hydrate final values from the canonical ticket repository.

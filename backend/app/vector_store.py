@@ -264,6 +264,12 @@ class LocalVectorStore:
             ]
             return sorted(scored, key=lambda item: item.score, reverse=True)[:limit]
 
+    def documents(self) -> list[RetrievalDocument]:
+        """Return the currently indexed canonical documents for lexical ranking."""
+
+        with self._lock:
+            return list(self._documents.values())
+
     def status(self) -> dict[str, object]:
         with self._lock:
             return {

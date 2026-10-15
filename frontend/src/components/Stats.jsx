@@ -178,7 +178,13 @@ export default function Stats({ onDrilldown }) {
       </section>
       <div className="mt-6"><RecordTypePipeline records={stats?.record_type_pipeline ?? []} onRecordClick={(record) => openDrilldown(`${record?.label || 'Unknown'} records`, (ticket) => ticket?.type === record?.label)} /></div>
       <div className="mt-6 grid gap-6 xl:grid-cols-2">
-        <DonutChart title="SLA health" subtitle="Breaches remain visible alongside at-risk and on-track SLA records." segments={stats?.sla_health_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`SLA health · ${segment?.label || 'Unknown'}`, (ticket) => (segment?.label === 'Breached' ? ticket?.is_breached : segment?.label === 'At risk' ? !ticket?.is_breached && ticket?.sla_health === 'YELLOW' : segment?.label === 'On track' ? ticket?.sla_health === 'GREEN' : ['PRB', 'CHG'].includes(ticket?.type)))} />
+        <DonutChart title="SLA health" subtitle="Breaches remain visible alongside at-risk and on-track SLA records." segments={stats?.sla_health_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`SLA health · ${segment?.label || 'Unknown'}`, (ticket) => {
+          const label = String(segment?.label || '').toLowerCase()
+          if (label === 'breached') return Boolean(ticket?.is_breached)
+          if (label === 'at risk') return !ticket?.is_breached && ticket?.sla_health === 'YELLOW'
+          if (label === 'on track') return !ticket?.is_breached && ticket?.sla_health === 'GREEN'
+          return ['PRB', 'CHG'].includes(ticket?.type)
+        })} />
         <DonutChart title="SLA breaches by record type" subtitle="Shows the record mix behind breached SLA commitments." segments={stats?.breach_by_type ?? []} onSegmentClick={(segment) => openDrilldown(`Breached ${segment?.label || 'Unknown'} tickets`, (ticket) => ticket?.is_breached && ticket?.type === segment?.label)} />
         <DonutChart title="Workflow pipeline" subtitle="Operational state distribution across all selected ITSM record types." segments={stats?.pipeline_state_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`Workflow · ${segment?.label || 'Unknown'}`, (ticket) => segment?.label === 'Open / Active' ? activeStates.has(ticket?.state) : segment?.label === 'On hold' ? ticket?.state === 'On Hold' : closedStates.has(ticket?.state))} />
         <DonutChart title="Awaiting dependency mix" subtitle="On-hold work, grouped strictly by the ServiceNow hold reason." segments={stats?.awaiting_breakdown ?? []} onSegmentClick={(segment) => openDrilldown(`On Hold · ${segment?.label || 'Unknown'}`, (ticket) => ticket?.state === 'On Hold' && ticket?.hold_reason === segment?.label)} />

@@ -28,17 +28,23 @@ class OllamaGenerator:
 
     def __init__(self) -> None:
         self.base_url = os.getenv("ATLAS_OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
+        # Keep local inference within the approved Llama family. The 3B model
+        # is the primary quality profile; 1B is the only supported fast
+        # fallback for CPU-constrained developer environments.
         self.model = os.getenv("ATLAS_OLLAMA_MODEL", "llama3.2:3b")
-        self.fallback_model = os.getenv("ATLAS_OLLAMA_FALLBACK_MODEL", "llama3:8b")
+        self.fallback_model = os.getenv("ATLAS_OLLAMA_FALLBACK_MODEL", "llama3.2:1b")
         # Keep local CPU generation deliberately bounded.  RAG provides a
         # compact context payload, while Ollama receives enough room for a
         # complete but responsive answer.
         self.temperature = float(os.getenv("ATLAS_OLLAMA_TEMPERATURE", "0.2"))
         # Most dashboard and ticket questions need a focused answer. RAG can
         # opt into a larger per-request budget for explicitly complete SOPs.
-        self.max_tokens = max(1, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "220")))
-        self.context_window = max(256, int(os.getenv("ATLAS_OLLAMA_NUM_CTX", "2048")))
-        self.num_threads = max(1, int(os.getenv("ATLAS_OLLAMA_NUM_THREAD", "4")))
+        self.max_tokens = max(1, min(700, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "700"))))
+        # A shorter context lowers CPU prompt-evaluation time for normal chat
+        # turns while retaining room for grounded runbook evidence.
+        self.context_window = max(256, int(os.getenv("ATLAS_OLLAMA_NUM_CTX", "1536")))
+        self.num_threads = max(1, int(os.getenv("ATLAS_OLLAMA_NUM_THREAD", "3")))
+        self.num_batch = max(32, int(os.getenv("ATLAS_OLLAMA_NUM_BATCH", "512")))
         # llama3.2:3b can take longer than a short HTTP window to generate a
         # grounded multi-document answer on a CPU-only development container.
         self.timeout_seconds = float(os.getenv("ATLAS_OLLAMA_TIMEOUT_SECONDS", "90"))
@@ -95,6 +101,7 @@ class OllamaGenerator:
                 "num_predict": 1,
                 "num_ctx": self.context_window,
                 "num_thread": self.num_threads,
+                "num_batch": self.num_batch,
             },
         }
         timeout = httpx.Timeout(connect=10.0, read=self.timeout_seconds, write=30.0, pool=10.0)
@@ -129,6 +136,7 @@ class OllamaGenerator:
                 "num_predict": max_tokens or self.max_tokens,
                 "num_ctx": self.context_window,
                 "num_thread": self.num_threads,
+                "num_batch": self.num_batch,
             },
         }
         errors: list[str] = []
@@ -181,6 +189,7 @@ class OllamaGenerator:
                 "num_predict": max_tokens or self.max_tokens,
                 "num_ctx": self.context_window,
                 "num_thread": self.num_threads,
+                "num_batch": self.num_batch,
             },
         }
         errors: list[str] = []
@@ -229,6 +238,7 @@ class OllamaGenerator:
             "max_tokens": self.max_tokens,
             "num_ctx": self.context_window,
             "num_thread": self.num_threads,
+            "num_batch": self.num_batch,
             "state": self._state,
             "available_models": self._available_models,
             "error": self._error,

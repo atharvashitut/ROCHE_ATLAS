@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - optional until requirements are instal
 # directly (for example from a worker or a smoke test), rather than only after
 # FastAPI has imported `main`.
 from .models import MOCK_DB, is_sla_at_risk, is_sla_breached  # noqa: F401
-from .central_db import central_ticket_by_reference, central_ticket_records
+from .central_db import central_knowledge_records, central_ticket_by_reference, central_ticket_records
 from .connectors import connector_documents, connector_statuses
 from .ollama_client import OLLAMA_GENERATOR, OllamaStreamError
 from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, serialize_retrieved
@@ -177,20 +177,24 @@ def _has_unmapped_signature(query_text: str) -> bool:
     return False
 
 
-def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, object]]:
+def retrieve_vector_context(query_text: str, limit: int = 4) -> list[dict[str, object]]:
     """Execute hybrid semantic + lexical relevance filtering over vector results."""
 
     if not query_text.strip():
         return []
-    documents = build_retrieval_documents()
-    VECTOR_STORE.sync(documents)
+    # The index is hydrated once at application startup. Avoid rebuilding the
+    # corpus and hashing every document on each chat turn; reindex_vector_db()
+    # remains the explicit refresh point when a connector source changes.
+    if not VECTOR_STORE.status()["document_count"]:
+        initialize_vector_db()
+    documents = VECTOR_STORE.documents()
     terms = _query_terms(query_text)
     explicit_tickets = _explicit_ticket_numbers(query_text)
     selected: list[dict[str, object]] = []
     selected_ids: set[str] = set()
     # SOP and SUD questions need enough adjacent source evidence to preserve
     # prerequisites, approvals, and the complete remediation sequence.
-    selection_limit = 8 if _is_knowledge_procedure_request(query_text) else 6
+    selection_limit = min(limit, 5 if _is_knowledge_procedure_request(query_text) else 4)
     # A direct ServiceNow number is an authoritative context selection. Add
     # its overview/journal/task chunks before approximate vector results.
     for document in documents:
@@ -246,7 +250,7 @@ def retrieve_vector_context(query_text: str, limit: int = 8) -> list[dict[str, o
     return selected[:selection_limit]
 
 
-def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
+def _live_ticket_context(chunks: list[dict[str, object]], *, limit: int = 3) -> str:
     """Hydrate retrieved ticket IDs from MOCK_DB immediately before generation."""
 
     ticket_ids = {
@@ -255,7 +259,7 @@ def _live_ticket_context(chunks: list[dict[str, object]]) -> str:
     }
     live_records = [central_ticket_records().get(ticket_id) for ticket_id in ticket_ids]
     snapshots = []
-    for ticket in live_records:
+    for ticket in live_records[:limit]:
         if ticket is None:
             continue
         latest_comment = ticket.comments[-1].value if ticket.comments else "No journal comment recorded"
@@ -273,20 +277,30 @@ def _grounded_prompt(
     *,
     operational_context: str = "",
     history: list[dict[str, str]] | None = None,
+    fds_standard_context: str = "",
 ) -> str:
     """Build evidence for generation without prescribing a response template."""
 
-    excerpts = _procedural_markdown_context(chunks)
+    # Stats answers already have exact values in the live aggregation, so
+    # they need only a compact supporting excerpt. This keeps chart queries
+    # especially responsive on CPU-only Ollama while preserving deep SOP text.
+    evidence_budget = (
+        900 if _is_fds_generation_request(query_text)
+        else 1500 if _is_knowledge_procedure_request(query_text)
+        else 400 if _is_metrics_intent(query_text)
+        else 700
+    )
+    excerpts = _procedural_markdown_context(chunks, max_characters=evidence_budget)
     # Prior model answers can be several thousand characters each. Bound the
     # transcript before local CPU inference so a follow-up remains responsive
     # while retaining the most recent conversational intent.
     transcript_lines: list[str] = []
-    for item in (history or [])[-4:]:
+    for item in (history or [])[-2:]:
         if not isinstance(item, dict):
             continue
         text = " ".join(str(item.get("text", "")).split())
-        if len(text) > 360:
-            text = f"{text[:357].rstrip()}…"
+        if len(text) > 240:
+            text = f"{text[:237].rstrip()}…"
         if text:
             transcript_lines.append(f"{str(item.get('role', 'user')).title()}: {text}")
     transcript = "\n".join(transcript_lines)
@@ -294,6 +308,7 @@ def _grounded_prompt(
         f"User question:\n{query_text}\n\n"
         f"Recent conversation (optional context):\n{transcript or 'None'}\n\n"
         f"Live operational context:\n{operational_context or _live_ticket_context(chunks) or 'No directly matched live record.'}\n\n"
+        f"Functional design standard:\n{fds_standard_context or 'Not requested.'}\n\n"
         f"Retrieved enterprise evidence:\n{excerpts or 'No internal document matched. Use general expertise and clearly distinguish assumptions.'}"
     )
 
@@ -344,6 +359,7 @@ def _local_generation_prompt(
     *,
     operational_context: str = "",
     history: list[dict[str, str]] | None = None,
+    fds_standard_context: str = "",
 ) -> str:
     """Return a complete grounded prompt for the process-external model."""
 
@@ -352,24 +368,38 @@ def _local_generation_prompt(
         chunks,
         operational_context=operational_context,
         history=history,
-    ) if chunks or operational_context else _fallback_prompt(query_text)
+        fds_standard_context=fds_standard_context,
+    ) if chunks or operational_context or fds_standard_context else _fallback_prompt(query_text)
 
 
-def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False) -> str:
+def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False, fds_mode: bool = False) -> str:
     """Shared system envelope for Gemini and local Ollama synthesis."""
 
+    metric_instruction = (
+        " Metric mode: answer with exactly one short factual sentence in this order: scope, total records, breached, at risk, on track, and on hold. "
+        "Copy only the exact counts from Live operational context; do not calculate or mention any percentage. "
+        "Never say that more analysis is needed and never substitute one ticket's SLA for the team total."
+        if metric_mode else ""
+    )
     concise_instruction = (
         " For a normal operational question, answer directly in no more than six short bullets or three short paragraphs. "
         "Only provide a long procedure when the user explicitly requests a complete, detailed, or step-by-step answer."
         if concise else
         " For an explicitly complete procedural request, preserve all relevant prerequisites, approvals, transaction codes, and validation steps."
     )
+    fds_instruction = (
+        " Functional-design mode: create a complete Markdown Functional Design Specification with exactly the eight numbered sections in the supplied governing standard. "
+        "Make the logic implementation-ready, use the retrieved process evidence, identify assumptions explicitly, and include traceability, data mappings, controlled errors, security, and three HP ALM-ready tests. "
+        "This applies to any requested SAP domain; do not limit the design to EWM unless the user's topic is EWM."
+        if fds_mode else ""
+    )
     return (
         "You are ATLAS, a senior SAP and GxP operations copilot. Use supplied live data and enterprise evidence as factual grounding. "
+        "Start immediately with the requested facts, answer, or procedure. Do not use polite preambles, meta-introductions, or phrases such as 'here is', 'I can help', or 'based on the context'. "
         "Answer the user's actual request in the style, tone, language, length, and format they ask for; you may summarize, explain, write creatively, or use bullets when useful. "
         "Do not invent operational facts or numeric values not supported by the context. When context is incomplete, say what is uncertain. "
         "You may cite a relevant supplied document link naturally when it improves the answer, but do not force citations or a fixed response template."
-        f"{concise_instruction}"
+        f"{metric_instruction}{concise_instruction}{fds_instruction}"
     )
 
 
@@ -394,6 +424,52 @@ def _is_knowledge_procedure_request(query_text: str) -> bool:
         r"\b(?:explain|process|procedure|workflow|runbook|sop|sud|documentation|instructions?|guide|steps?|how does)\b",
         query,
     ))
+
+
+def _is_fds_generation_request(query_text: str) -> bool:
+    """Recognise a request to author a Functional Design Specification.
+
+    This is intentionally domain-neutral: the governing template comes from
+    the canonical Veeva document while the process content comes from the
+    matching SUD/SOP documents retrieved for the requested SAP topic.
+    """
+
+    return bool(re.search(
+        r"\b(?:fds|functional\s+design(?:\s+specification)?|functional\s+specification|ricefw)\b",
+        query_text.casefold(),
+    ))
+
+
+def _fds_standard_context(*, max_characters: int = 1800) -> str:
+    """Derive a compact eight-section authoring contract from canonical docs.
+
+    The FDS requirements remain data owned by ``CENTRAL_KNOWLEDGE_DB``. This
+    helper deliberately reads that source at runtime rather than duplicating
+    an authoring template in the chat layer.
+    """
+
+    standards = [
+        record for record in central_knowledge_records()
+        if "fds" in {tag.casefold() for tag in record.get("tags", [])}
+        or "functional design specification" in str(record.get("source_type", "")).casefold()
+    ]
+    sections: list[str] = []
+    remaining = max_characters
+    for standard in standards:
+        content = str(standard.get("content", ""))
+        matches = re.findall(r"(Section\s+[1-8][\s\S]*?)(?=\n\nSection\s+[1-8]|\Z)", content, flags=re.IGNORECASE)
+        for match in matches:
+            normalized = " ".join(match.split())
+            if not normalized or remaining <= 0:
+                break
+            excerpt = normalized[:min(225, remaining)].rstrip()
+            if len(normalized) > len(excerpt):
+                excerpt = f"{excerpt.rstrip()}…"
+            sections.append(excerpt)
+            remaining -= len(excerpt) + 1
+        if remaining <= 0:
+            break
+    return "\n".join(sections)
 
 
 def is_ticket_status_request(query_text: str) -> bool:
@@ -514,7 +590,10 @@ def _workload_answer(scope_name: str, tickets: list[Any]) -> tuple[str, list[str
 def _is_metrics_intent(query_text: str) -> bool:
     """Recognise questions that require the live Stats calculation path."""
 
-    query = query_text.casefold()
+    # Users naturally alternate between "at risk" and "at-risk". Normalise
+    # separators before evaluating the generic metric vocabulary so chart
+    # eligibility follows the same SLA parser used for canonical filtering.
+    query = re.sub(r"[-_]", " ", query_text.casefold())
     metric_terms = (
         "metric", "metrics", "stats", "statistic", "dashboard", "chart", "kpi", "total",
         "how many", "count", "percentage", "percent", "sla health", "sla breach", "breached",
@@ -604,7 +683,6 @@ def _stats_context_block(stats: dict[str, Any]) -> str:
         f"SLA breached: {sla_segments.get('Breached', 0)}",
         f"SLA at risk: {sla_segments.get('At Risk', 0)}",
         f"SLA on track: {sla_segments.get('On Track', 0)}",
-        f"SLA compliance percentage: {round((sla_segments.get('On Track', 0) / max(1, sla_segments.get('Breached', 0) + sla_segments.get('At Risk', 0) + sla_segments.get('On Track', 0))) * 100)}",
         f"Awaiting caller: {summary['awaiting_caller']}",
         f"Awaiting change: {summary['awaiting_change']}",
         f"Awaiting child: {summary['awaiting_child']}",
@@ -625,8 +703,7 @@ def _stats_chart_payload(stats: dict[str, Any]) -> dict[str, object]:
         if segment["label"] != "No SLA (PRB/CHG)"
     ]
     work_state_data = [dict(segment) for segment in stats["work_state_breakdown"]]
-    tracked = sum(int(item["value"]) for item in sla_data)
-    compliant = int(next((item["value"] for item in sla_data if item["label"] == "On Track"), 0))
+    on_track = int(next((item["value"] for item in sla_data if item["label"] == "On Track"), 0))
     return {
         "type": "dashboard_summary",
         "title": f"Live operational snapshot — {scope}",
@@ -636,8 +713,7 @@ def _stats_chart_payload(stats: dict[str, Any]) -> dict[str, object]:
             {"label": "Total scope", "value": int(summary["total_tickets"]), "color": "#38bdf8"},
             {"label": "SLA breached", "value": int(summary["breached"]), "color": "#ef4444"},
             {"label": "At risk", "value": int(next((item["value"] for item in sla_data if item["label"] == "At Risk"), 0)), "color": "#f59e0b"},
-            {"label": "In compliance", "value": compliant, "color": "#10b981"},
-            {"label": "Compliance", "value": round((compliant / tracked) * 100) if tracked else 0, "suffix": "%", "color": "#14b8a6"},
+            {"label": "On track", "value": on_track, "color": "#10b981"},
             {"label": "On hold", "value": int(summary["on_hold"]), "color": "#a78bfa"},
         ],
         "charts": [
@@ -662,8 +738,8 @@ def _stats_answer(
     eligible = sla_segments.get("Breached", 0) + sla_segments.get("At Risk", 0) + sla_segments.get("On Track", 0)
     breached = sla_segments.get("Breached", 0)
     breach_rate = round((breached / eligible) * 100) if eligible else 0
-    compliance_count = sla_segments.get("On Track", 0)
-    compliance_rate = round((compliance_count / eligible) * 100) if eligible else 0
+    on_track_count = sla_segments.get("On Track", 0)
+    on_track_rate = round((on_track_count / eligible) * 100) if eligible else 0
     listed = [str(ticket["number"]) for ticket in stats.get("ticket_index", [])]
     # Read the scope from the exact serialized snapshot supplied to this
     # deterministic synthesizer. The numerical values below come from the
@@ -720,13 +796,13 @@ def _stats_answer(
                 "",
                 "Current Position",
                 f"• Total tracked records: {eligible}.",
-                f"• In compliance: {compliance_count} ({compliance_rate}%).",
+                f"• On track: {on_track_count} ({on_track_rate}%).",
                 f"• At risk: {sla_segments.get('At Risk', 0)}.",
                 f"• Breached: {breached} ({breach_rate}%).",
                 f"• Active work items in scope: {active_total}.",
                 "",
                 "SLA Breakdown",
-                f"• On track / in compliance: {compliance_count}.",
+                f"• Breached: {breached} · At risk: {sla_segments.get('At Risk', 0)} · On track: {on_track_count}.",
             ]),
             listed,
         )
@@ -1582,13 +1658,17 @@ def _sla_summary(ticket: Any) -> str:
     return f"{health} ({remaining}m remaining)"
 
 
-def _single_ticket_deep_dive(ticket: Any) -> str:
-    """Bounded human-only context for one explicitly referenced ServiceNow record."""
+def _single_ticket_deep_dive(
+    ticket: Any,
+    *,
+    include_description: bool = False,
+    include_journals: bool = False,
+) -> str:
+    """Return only the ticket fields needed for the user's stated lookup."""
 
     fields = (
         ("Number", getattr(ticket, "number", "")),
         ("Short description", getattr(ticket, "short_description", "")),
-        ("Full description", getattr(ticket, "description", "")),
         ("Priority", getattr(ticket, "priority", "")),
         ("State", getattr(ticket, "state", "")),
         ("Assignee", getattr(ticket, "assigned_to", "") or getattr(ticket, "assignee", "")),
@@ -1597,10 +1677,13 @@ def _single_ticket_deep_dive(ticket: Any) -> str:
     )
     lines = ["## Canonical ticket deep dive"]
     lines.extend(f"{label}: {value}" for label, value in fields if value not in (None, "", [], {}))
-    lines.append("### Three most recent work notes")
-    lines.extend(_latest_journal_lines(getattr(ticket, "work_notes", None), empty_label="- No work notes recorded."))
-    lines.append("### Three most recent comments")
-    lines.extend(_latest_journal_lines(getattr(ticket, "comments", None), empty_label="- No comments recorded."))
+    if include_description and getattr(ticket, "description", ""):
+        lines.append(f"Description: {ticket.description}")
+    if include_journals:
+        lines.append("### Three most recent work notes")
+        lines.extend(_latest_journal_lines(getattr(ticket, "work_notes", None), empty_label="- No work notes recorded."))
+        lines.append("### Three most recent comments")
+        lines.extend(_latest_journal_lines(getattr(ticket, "comments", None), empty_label="- No comments recorded."))
     return "\n".join(lines)
 
 
@@ -1625,11 +1708,22 @@ def _ticket_queue_summary(tickets: list[Any], *, label: str) -> str:
     return "\n".join(lines)
 
 
-def _operational_ticket_context(tickets: list[Any], *, label: str, deep_dive: bool = False) -> str:
+def _operational_ticket_context(
+    tickets: list[Any],
+    *,
+    label: str,
+    deep_dive: bool = False,
+    include_description: bool = False,
+    include_journals: bool = False,
+) -> str:
     """Serialize canonical records as bounded grounding context, never as a response."""
 
     if deep_dive:
-        return _single_ticket_deep_dive(tickets[0]) if tickets else f"{label}: no matching canonical ServiceNow record was found."
+        return _single_ticket_deep_dive(
+            tickets[0],
+            include_description=include_description,
+            include_journals=include_journals,
+        ) if tickets else f"{label}: no matching canonical ServiceNow record was found."
     return _ticket_queue_summary(tickets, label=label)
 
 
@@ -1646,23 +1740,38 @@ def _deterministic_failure_response(query_text: str, chunks: list[dict[str, obje
 def _generation_token_budget(query_text: str) -> int:
     """Keep normal interactive answers responsive without truncating deep SOPs."""
 
-    standard = max(100, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "220")))
+    cap = max(64, min(700, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "700"))))
+    standard = min(cap, max(256, int(os.getenv("ATLAS_OLLAMA_STANDARD_MAX_TOKENS", "256"))))
+    if _is_fds_generation_request(query_text):
+        # A design must contain all eight sections; use the available response
+        # budget rather than applying the terse interactive-answer profile.
+        return cap
     needs_procedure_depth = _is_knowledge_procedure_request(query_text) and bool(re.search(
         r"\b(?:complete|comprehensive|detailed|full|step[ -]?by[ -]?step)\b",
         query_text.casefold(),
     ))
     if needs_procedure_depth:
-        return max(standard, int(os.getenv("ATLAS_OLLAMA_DEEP_MAX_TOKENS", "1100")))
+        return min(cap, max(standard, int(os.getenv("ATLAS_OLLAMA_DEEP_MAX_TOKENS", "700"))))
     if _is_knowledge_procedure_request(query_text):
-        return max(standard, min(650, int(os.getenv("ATLAS_OLLAMA_PROCEDURE_MAX_TOKENS", "650"))))
+        return min(cap, max(standard, int(os.getenv("ATLAS_OLLAMA_PROCEDURE_MAX_TOKENS", "500"))))
+    if _is_metrics_intent(query_text):
+        return max(24, min(cap, int(os.getenv("ATLAS_OLLAMA_METRIC_MAX_TOKENS", "32"))))
+    if _explicit_ticket_numbers(query_text):
+        return min(cap, max(256, int(os.getenv("ATLAS_OLLAMA_TICKET_MAX_TOKENS", "256"))))
     return standard
 
 
 def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """Prepare one read-only RAG execution plan for JSON or SSE delivery."""
 
-    chunks = retrieve_vector_context(query_text)
     dashboard_filters = _dashboard_query_filters(query_text)
+    metrics_requested = _is_metrics_intent(query_text)
+    fds_requested = _is_fds_generation_request(query_text)
+    # Metrics are already fully grounded in the canonical Stats aggregation;
+    # three retrieval chunks are enough for an optional natural-language
+    # explanation, while procedural requests retain deeper evidence.
+    retrieval_limit = 3 if metrics_requested else 8 if fds_requested else 5 if _is_knowledge_procedure_request(query_text) else 4
+    chunks = retrieve_vector_context(query_text, limit=retrieval_limit)
     direct_ticket_ids = _explicit_ticket_numbers(query_text)
     direct_tickets = [
         ticket for ticket_id in direct_ticket_ids
@@ -1682,27 +1791,43 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
     if not scoped_tickets and (queue_language or filter_present) and (filter_present or assignees or groups or modules):
         scoped_tickets, _ = _dashboard_filtered_tickets(query_text)
 
-    metrics_requested = _is_metrics_intent(query_text)
     sla_visual_requested = _is_sla_health_question(query_text) or str(dashboard_filters["sla_mode"]) in {"at_risk", "breached", "on_track", "non_breached"}
     stats_context: str | None = None
     chart_data: dict[str, object] | None = None
+    metric_answer: str | None = None
     if metrics_requested:
         live_stats = _live_stats_snapshot(query_text, active_only=True)
         stats_context = _stats_context_block(live_stats)
+        # Numerical analytics are a calculation, not a generative task. Use
+        # the exact canonical aggregation for their concise chat copy so the
+        # text and chart can never disagree and KPI questions return without
+        # waiting on local CPU inference.
+        metric_answer, _ = _stats_answer(query_text, live_stats, stats_context)
         if sla_visual_requested:
             chart_data = _stats_chart_payload(live_stats)
 
+    # A KPI question is grounded by the canonical Stats snapshot. Adding five
+    # queue cards to that same prompt costs CPU tokens and can distract a
+    # compact local model from the exact totals. Preserve ticket context for
+    # explicit ticket references and for requests that actually ask to list
+    # or inspect the matching records.
+    include_ticket_context = bool(direct_tickets) or not metrics_requested or bool(dashboard_filters.get("asks_for_details"))
+    query = query_text.casefold()
     ticket_context = _operational_ticket_context(
         scoped_tickets,
         label="Exact ticket match" if direct_tickets else "Live canonical queue filter",
         deep_dive=bool(direct_tickets),
-    ) if scoped_tickets else ""
+        include_description=bool(re.search(r"\b(?:description|details?|what(?:'s| is) happening|explain)\b", query)),
+        include_journals=bool(re.search(r"\b(?:journal|comment|work notes?|history|latest update)\b", query)),
+    ) if scoped_tickets and include_ticket_context else ""
     operational_context = "\n\n".join(part for part in (stats_context, ticket_context) if part)
+    fds_context = _fds_standard_context() if fds_requested else ""
     prompt = _local_generation_prompt(
         query_text,
         chunks,
         operational_context=operational_context,
         history=history,
+        fds_standard_context=fds_context,
     )
 
     ticket_ids: list[str] = []
@@ -1714,7 +1839,7 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         if ticket.number not in ticket_ids:
             ticket_ids.append(ticket.number)
 
-    intent = "direct_ticket" if direct_tickets else "live_ticket_context" if scoped_tickets else "live_stats_context" if metrics_requested else "vector_grounded_rag"
+    intent = "functional_design_generation" if fds_requested else "direct_ticket" if direct_tickets else "live_ticket_context" if scoped_tickets else "live_stats_context" if metrics_requested else "vector_grounded_rag"
     generation_max_tokens = _generation_token_budget(query_text)
     return {
         "query_text": query_text,
@@ -1723,6 +1848,7 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         "system_prompt": _synthesis_system_prompt(
             metric_mode=metrics_requested,
             concise=generation_max_tokens <= 300,
+            fds_mode=fds_requested,
         ),
         "max_tokens": generation_max_tokens,
         "operational_context": operational_context,
@@ -1730,7 +1856,9 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         "intent": intent,
         "listed_ticket_ids": [ticket.number for ticket in scoped_tickets],
         "stats_context": stats_context,
+        "metric_answer": metric_answer,
         "chart_data": chart_data,
+        "fds_standard_context": fds_context,
         "sources": _sources(chunks),
         "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
         "retrieval_route": "vector_plus_live_context" if operational_context else "vector_grounded_rag" if chunks else "general_reasoning",
@@ -1756,6 +1884,14 @@ def hybrid_rag_metadata(plan: dict[str, Any]) -> dict[str, Any]:
 async def stream_hybrid_rag(plan: dict[str, Any]):
     """Yield model deltas; leave transport framing to the FastAPI route."""
 
+    if plan.get("metric_answer"):
+        yield {
+            "type": "token",
+            "content": str(plan["metric_answer"]),
+            "model_used": "canonical-live-analytics",
+        }
+        return
+
     try:
         async for content, model in OLLAMA_GENERATOR.stream_generate(
             system_prompt=str(plan["system_prompt"]),
@@ -1780,6 +1916,13 @@ async def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None
     """Ground every query, then send every healthy request to Ollama."""
 
     plan = prepare_hybrid_rag(query_text, history)
+    if plan.get("metric_answer"):
+        return {
+            "answer": str(plan["metric_answer"]),
+            **hybrid_rag_metadata(plan),
+            "model_used": "canonical-live-analytics",
+            "fallback_reasoning": False,
+        }
     generated, model = await OLLAMA_GENERATOR.generate(
         system_prompt=str(plan["system_prompt"]),
         user_prompt=str(plan["prompt"]),

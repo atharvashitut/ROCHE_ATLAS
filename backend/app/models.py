@@ -194,8 +194,19 @@ class Ticket(BaseModel):
         # Retain the original field while API consumers migrate to the canonical name.
         self.sla_remaining_mins = self.sla_remaining_minutes
         self.sla_time_remaining = self.sla_remaining_minutes
-        if self.sla_time_remaining is not None:
-            self.sla_health = "RED" if self.sla_time_remaining <= 0 else "YELLOW" if self.sla_time_remaining <= SLA_WARNING_BUFFER_MINUTES else "GREEN"
+        if self.type in {"INC", "RITM"}:
+            # SLA state is calculated from one canonical rule. Do not allow a
+            # legacy fixture label to disagree with remaining time or an
+            # explicit breach flag consumed by Dashboard, Stats, and Chat.
+            if self.is_breached or (self.sla_time_remaining is not None and self.sla_time_remaining <= 0):
+                self.sla_status = "BREACHED"
+                self.sla_health = "RED"
+            elif self.sla_time_remaining is not None and self.sla_time_remaining <= SLA_WARNING_BUFFER_MINUTES:
+                self.sla_status = "AT_RISK"
+                self.sla_health = "YELLOW"
+            else:
+                self.sla_status = "ON_TRACK"
+                self.sla_health = "GREEN"
         self.parent_incident_id = self.parent_id or self.parent_incident_id
         self.parent_id = self.parent_incident_id
         self.child_incident_ids = self.child_ids or self.child_incident_ids
@@ -897,6 +908,33 @@ MOCK_DB.update({
         comments=_journal_thread("INC0048144", requester="Warehouse Operations", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Warehouse recovery validation cannot begin until the parent qRFC incident confirms the queue-unlock recovery status.", monitoring_check="L1 confirmed the local validation evidence is ready and no standalone device fault is present.", business_impact="The dependent warehouse regression test remains paused until the primary incident recovery is confirmed.", diagnostic_update="EWM L2 linked this child incident to INC0048102 and placed it on hold pending the parent recovery confirmation."),
         resources={"KBA": "KBA003192 — qRFC queue recovery", "Veeva": "Veeva Vault / Warehouse / recovery-validation-control", "GDrive": "ATLAS / SAP EWM / parent-recovery validation KT"},
     ),
+    "INC0048145": Ticket(
+        id="INC0048145", type="INC", record_type="INC", title="SAP EWM qRFC Recovery Validation Blocked by Child Test",
+        description="The controlled qRFC recovery validation cannot progress until the dependent RF regression test completes and returns warehouse evidence.", state="On Hold",
+        priority="P1", assignee="Maya Chen", caller_id="Warehouse Operations", assignment_group="SAP EWM Support", opened_on="2026-10-05",
+        is_breached=True, hold_reason="Awaiting Child", sla_remaining_minutes=-32, sentiment="Frustrated", parent_id="INC0048102",
+        latest_work_notes="EWM L2 preserved the queue-recovery evidence and is waiting for the child RF validation before releasing the final recovery decision.",
+        comments=_journal_thread("INC0048145", requester="Warehouse Operations", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="The qRFC recovery test is blocked because the dependent RF regression evidence is not yet complete.", monitoring_check="L1 confirmed the primary queue is stable and recorded the outstanding child test reference.", business_impact="Warehouse operations cannot sign off the recovery while the dependent scanner validation remains incomplete.", diagnostic_update="EWM L2 retained the recovery evidence and placed the record on hold until the child validation confirms end-to-end goods issue processing."),
+        resources={"KBA": "KBA003192 — qRFC queue recovery", "Veeva": "Veeva Vault / Warehouse / recovery-validation-control", "GDrive": "ATLAS / SAP EWM / qRFC recovery regression KT"},
+    ),
+    "INC0048146": Ticket(
+        id="INC0048146", type="INC", record_type="INC", title="SAP Basis IDoc Recovery Pending Problem RCA",
+        description="A recurring IDoc monitoring failure is paused pending the linked Problem investigation's approved root-cause and recovery procedure.", state="On Hold",
+        priority="P2", assignee="Jonas Weber", caller_id="Integration Operations", assignment_group="SAP Basis Ops", opened_on="2026-10-03",
+        hold_reason="Awaiting Problem", sla_remaining_minutes=64, sentiment="Impatient", linked_problem="PRB0031022",
+        latest_work_notes="Basis L2 collected SMQ2 and ST22 evidence and is awaiting the linked Problem RCA before retrying the impacted interface queue.",
+        comments=_journal_thread("INC0048146", requester="Integration Operations", l1_support="Basis Service Desk", l2_support="Jonas Weber", initial_report="The controlled IDoc recovery cannot proceed until the recurring queue failure has an approved root-cause path.", monitoring_check="L1 captured the blocked queue name, destination, and most recent error evidence.", business_impact="Operations cannot release the affected interface backlog without confirming the retry will not recreate the failure.", diagnostic_update="SAP Basis placed the incident on hold pending the linked Problem RCA and controlled retry recommendation."),
+        resources={"KBA": "KBA-BASIS-492 — IDoc queue recovery", "Veeva": "Veeva Vault / Infrastructure / interface-recovery-control", "GDrive": "ATLAS / SAP Basis / IDoc recovery KT"},
+    ),
+    "INC0048147": Ticket(
+        id="INC0048147", type="INC", record_type="INC", title="SAP EWM Request Hub Release Waiting for Vendor Confirmation",
+        description="Request Hub orders remain queued because the external connector vendor must confirm the corrected delivery-status callback behaviour.", state="On Hold",
+        priority="P2", assignee="Maya Chen", caller_id="Laboratory Logistics", assignment_group="SAP EWM Support", opened_on="2026-10-01",
+        hold_reason="Awaiting Vendor", sla_remaining_minutes=78, sentiment="Impatient",
+        latest_work_notes="EWM L2 validated the internal request flow and is waiting for the vendor's callback confirmation before safely releasing queued requests.",
+        comments=_journal_thread("INC0048147", requester="Laboratory Logistics", l1_support="Warehouse Service Desk", l2_support="Maya Chen", initial_report="Request Hub orders are waiting because the external delivery-status callback is not returning the expected confirmation.", monitoring_check="L1 verified the Request Hub to MuleSoft payload completed and isolated the missing callback acknowledgement.", business_impact="Scientists cannot see confirmed material-request status for the next laboratory delivery cycle.", diagnostic_update="EWM L2 retained the request evidence and is awaiting the vendor's confirmation of the corrected callback behaviour."),
+        resources={"KBA": "KBA-EWM-358 — Request Hub callback recovery", "Veeva": "Veeva Vault / Warehouse / request-order-control", "GDrive": "ATLAS / SAP EWM / Request Hub monitoring KT"},
+    ),
     "PRB0031023": Ticket(
         id="PRB0031023", type="PRB", record_type="PRB", title="SAP PLM Classification Route Mapping Regression",
         description="Problem investigation into a PLM classification-route mapping regression affecting design BOM updates after the controlled mapping release.", state="Root Cause Analysis",
@@ -1194,6 +1232,24 @@ TICKET_RESOLUTION_PLANS: dict[str, dict[str, object]] = {
         ("Confirm INC0048102 has completed its queue and authorization validation", "This child record must not independently change queue settings while the parent recovery is active.", "Parent topology + INC0048102 journal"),
         ("Run the prepared warehouse regression test in /SCWM/MON", "After parent clearance, validate the dependent flow, goods issue, and queue status with the prepared evidence set.", "EWM recovery-validation SOP"),
         ("Document the child validation against the parent closure evidence", "Link the result so the parent and child records retain one consistent recovery narrative.", "ServiceNow relational record policy"),
+    ),
+    "INC0048145": _resolution_plan(
+        "Protect the qRFC recovery decision by completing the dependent RF regression test before accepting the warehouse recovery as durable.",
+        ("Confirm the parent queue recovery evidence in SMQ1, SMQ2, and SM12", "Verify the queue is stable and no active lock owner remains before relying on the child test result.", "INC0048102 recovery evidence + KBA003192"),
+        ("Complete the dependent RF regression test", "Validate a representative goods-issue and scanner transaction so the child dependency proves the whole warehouse path, not only queue health.", "Child validation evidence + Warehouse Operations confirmation"),
+        ("Release the hold only after both evidence sets agree", "Record the final queue and RF results in work notes before closing or progressing the recovery decision.", "ServiceNow audit trail + Veeva recovery control"),
+    ),
+    "INC0048146": _resolution_plan(
+        "Keep the IDoc retry controlled until the linked Problem RCA establishes why the queue recurs and which remediation is safe.",
+        ("Preserve the failed queue evidence in SMQ2 and the related ST22 context", "Capture queue name, destination, LUW error, and dump correlation before any retry or reset.", "INC0048146 journal + Basis queue evidence"),
+        ("Review PRB0031022 for the approved root-cause path", "Use the Problem's queue and authorization findings to determine whether the blocked IDoc belongs to the same recurring pattern.", "PRB0031022 RCA + linked topology"),
+        ("Retry one controlled message after RCA approval", "Confirm the interface completes without recreating the error before releasing the remaining backlog.", "Integration Operations validation"),
+    ),
+    "INC0048147": _resolution_plan(
+        "Restore Request Hub delivery-status confirmations by proving the external callback correction before releasing queued laboratory requests.",
+        ("Trace the request through Request Hub, MuleSoft, and the EWM acknowledgement", "Capture the request ID, callback correlation ID, and the point at which the vendor acknowledgement is missing.", "Request Hub monitoring + incident journal"),
+        ("Obtain vendor confirmation of the corrected callback contract", "Do not replay queued requests until the vendor confirms the response structure and status mapping are stable.", "On-hold reason + connector support evidence"),
+        ("Release and validate one representative request", "Confirm the request progresses through the expected order status and the requester sees the correct delivery confirmation.", "Warehouse Operations validation"),
     ),
     "PRB0031023": _resolution_plan(
         "Eliminate the PLM classification-route regression by proving the deployed profile differs from the approved mapping and validating the correction in QA.",
