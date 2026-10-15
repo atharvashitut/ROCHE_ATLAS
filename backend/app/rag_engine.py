@@ -388,8 +388,14 @@ def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False, fds_mo
         " For an explicitly complete procedural request, preserve all relevant prerequisites, approvals, transaction codes, and validation steps."
     )
     fds_instruction = (
-        " Functional-design mode: create a complete Markdown Functional Design Specification with exactly the eight numbered sections in the supplied governing standard. "
-        "Make the logic implementation-ready, use the retrieved process evidence, identify assumptions explicitly, and include traceability, data mappings, controlled errors, security, and three HP ALM-ready tests. "
+        " Functional-design mode: create a complete Markdown Functional Design Specification with exactly these eight H2 headings, in this order: "
+        "1. Document Header and Control; 2. Business Context and Scope; 3. Process Flow Diagram; 4. Functional Logic and Processing Algorithm; "
+        "5. Technical Mapping and Data Dictionary; 6. Exception Handling and Error Codes; 7. Security and Authorization Requirements; "
+        "8. Acceptance Criteria and HP ALM Test Cases. Do not rename, omit, merge, or add sections. "
+        "Make the logic implementation-ready, use the retrieved process evidence, identify assumptions explicitly, and include traceability, data mappings, controlled errors, and security. "
+        "Section 8 is mandatory and must contain exactly three distinct HP ALM-ready scripts named Positive Functional Path, Negative Boundary Gate, and Authorization Security Gate. "
+        "For each script provide a test ID, objective, prerequisites, explicit action steps, expected results, screenshot evidence, and URS/FDS/ServiceNow Change/HP ALM Requirement traceability. "
+        "Finish only after Section 8 with the literal marker END OF FDS. "
         "This applies to any requested SAP domain; do not limit the design to EWM unless the user's topic is EWM."
         if fds_mode else ""
     )
@@ -1737,28 +1743,33 @@ def _deterministic_failure_response(query_text: str, chunks: list[dict[str, obje
 
 
 
-def _generation_token_budget(query_text: str) -> int:
-    """Keep normal interactive answers responsive without truncating deep SOPs."""
+def _is_brief_operational_lookup(query_text: str) -> bool:
+    """Identify only the short operational lookups eligible for the small tier."""
 
-    cap = max(64, min(700, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "700"))))
-    standard = min(cap, max(256, int(os.getenv("ATLAS_OLLAMA_STANDARD_MAX_TOKENS", "256"))))
-    if _is_fds_generation_request(query_text):
-        # A design must contain all eight sections; use the available response
-        # budget rather than applying the terse interactive-answer profile.
-        return cap
-    needs_procedure_depth = _is_knowledge_procedure_request(query_text) and bool(re.search(
-        r"\b(?:complete|comprehensive|detailed|full|step[ -]?by[ -]?step)\b",
-        query_text.casefold(),
-    ))
-    if needs_procedure_depth:
-        return min(cap, max(standard, int(os.getenv("ATLAS_OLLAMA_DEEP_MAX_TOKENS", "700"))))
-    if _is_knowledge_procedure_request(query_text):
-        return min(cap, max(standard, int(os.getenv("ATLAS_OLLAMA_PROCEDURE_MAX_TOKENS", "500"))))
-    if _is_metrics_intent(query_text):
-        return max(24, min(cap, int(os.getenv("ATLAS_OLLAMA_METRIC_MAX_TOKENS", "32"))))
-    if _explicit_ticket_numbers(query_text):
-        return min(cap, max(256, int(os.getenv("ATLAS_OLLAMA_TICKET_MAX_TOKENS", "256"))))
-    return standard
+    query = query_text.casefold()
+    # Any request for reasoning, an authored deliverable, or implementation
+    # guidance is full-budget by default, even when it mentions a ticket/SLA.
+    if re.search(
+        r"\b(?:fds|functional\s+design|ricefw|hp\s*alm|test\s*case|rca|root\s*cause|sop|runbook|"
+        r"procedure|troubleshoot(?:ing)?|technical|architect(?:ure|ural)?|explain|why|how\s+(?:does|do|to)|"
+        r"design|implement|steps?|recommend|analysis)\b",
+        query,
+    ):
+        return False
+
+    status_field = r"(?:status|state|update|priority|sla(?:\s+(?:status|health))?)"
+    ticket_lookup = bool(_explicit_ticket_numbers(query_text)) and bool(re.search(rf"\b{status_field}\b", query))
+    assignee_lookup = bool(re.search(r"\b(?:assignee|assigned\s+to)\b", query)) and bool(re.search(rf"\b{status_field}\b", query))
+    basic_metric_lookup = bool(re.search(r"\b(?:metric|metrics|kpi|stats?|count|total|how\s+many|number\s+of)\b", query))
+    return ticket_lookup or assignee_lookup or basic_metric_lookup
+
+
+def _generation_token_budget(query_text: str) -> int:
+    """Use 350 tokens only for explicit brief lookups; default everything else to 2,048."""
+
+    full_budget = max(350, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "2048")))
+    brief_budget = min(full_budget, max(1, int(os.getenv("ATLAS_OLLAMA_STANDARD_MAX_TOKENS", "350"))))
+    return brief_budget if _is_brief_operational_lookup(query_text) else full_budget
 
 
 def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
@@ -1847,7 +1858,7 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         "prompt": prompt,
         "system_prompt": _synthesis_system_prompt(
             metric_mode=metrics_requested,
-            concise=generation_max_tokens <= 300,
+            concise=generation_max_tokens <= 350,
             fds_mode=fds_requested,
         ),
         "max_tokens": generation_max_tokens,
@@ -1869,6 +1880,7 @@ def hybrid_rag_metadata(plan: dict[str, Any]) -> dict[str, Any]:
     """Return response metadata before a streaming generation begins."""
 
     return {
+        "max_tokens": plan["max_tokens"],
         "sources": plan["sources"],
         "embedding_model": VECTOR_STORE.status()["embedding_model"],
         "retrieval_route": plan["retrieval_route"],

@@ -938,6 +938,7 @@ async def query_chat(query: ChatQuery) -> dict[str, object]:
         "topology": topology_payload(ticket) if ticket else None,
         "sources": rag_result["sources"],
         "model_used": rag_result["model_used"],
+        "max_tokens": rag_result["max_tokens"],
         "embedding_model": rag_result["embedding_model"],
         "fallback_reasoning": rag_result["fallback_reasoning"],
         "retrieval_route": rag_result["retrieval_route"],

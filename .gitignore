@@ -1,5 +1,7 @@
 .atlas-vector-db/
 backend/.atlas-vector-db/
+.venv/
+__pycache__/
 .env
 .env.*
 !.env.example

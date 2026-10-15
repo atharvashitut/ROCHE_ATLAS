@@ -33,21 +33,21 @@ class OllamaGenerator:
         # fallback for CPU-constrained developer environments.
         self.model = os.getenv("ATLAS_OLLAMA_MODEL", "llama3.2:3b")
         self.fallback_model = os.getenv("ATLAS_OLLAMA_FALLBACK_MODEL", "llama3.2:1b")
-        # Keep local CPU generation deliberately bounded.  RAG provides a
-        # compact context payload, while Ollama receives enough room for a
-        # complete but responsive answer.
+        # The response limit is controlled by the request profile in
+        # rag_engine. Do not impose a second fixed ceiling here: a complete
+        # regulated FDS needs substantially more space than an interactive
+        # ticket lookup.
         self.temperature = float(os.getenv("ATLAS_OLLAMA_TEMPERATURE", "0.2"))
-        # Most dashboard and ticket questions need a focused answer. RAG can
-        # opt into a larger per-request budget for explicitly complete SOPs.
-        self.max_tokens = max(1, min(700, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "700"))))
-        # A shorter context lowers CPU prompt-evaluation time for normal chat
-        # turns while retaining room for grounded runbook evidence.
-        self.context_window = max(256, int(os.getenv("ATLAS_OLLAMA_NUM_CTX", "1536")))
-        self.num_threads = max(1, int(os.getenv("ATLAS_OLLAMA_NUM_THREAD", "3")))
+        self.max_tokens = max(1, int(os.getenv("ATLAS_OLLAMA_MAX_TOKENS", "2048")))
+        # Keep enough prompt and generation room for a complete eight-section
+        # FDS while each request's output budget remains explicit.
+        self.context_window = max(256, int(os.getenv("ATLAS_OLLAMA_NUM_CTX", "4096")))
+        # Eight-vCPU profile: reserve one CPU for FastAPI and host processes.
+        self.num_threads = max(1, int(os.getenv("ATLAS_OLLAMA_NUM_THREAD", "7")))
         self.num_batch = max(32, int(os.getenv("ATLAS_OLLAMA_NUM_BATCH", "512")))
         # llama3.2:3b can take longer than a short HTTP window to generate a
         # grounded multi-document answer on a CPU-only development container.
-        self.timeout_seconds = float(os.getenv("ATLAS_OLLAMA_TIMEOUT_SECONDS", "90"))
+        self.timeout_seconds = float(os.getenv("ATLAS_OLLAMA_TIMEOUT_SECONDS", "600"))
         self.diagnostic_timeout_seconds = float(os.getenv("ATLAS_OLLAMA_DIAGNOSTIC_TIMEOUT_SECONDS", "2"))
         self._state = "unknown"
         self._available_models: list[str] = []
