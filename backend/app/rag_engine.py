@@ -836,7 +836,7 @@ def _stats_answer(
 
 
 def _ticket_answer(ticket: Any) -> str:
-    """Return direct canonical detail for an explicit ServiceNow reference."""
+    """Return an actionable, canonical answer for an explicit ticket reference."""
 
     latest = ticket.comments[-1].value if ticket.comments else "No customer-visible update is recorded."
     details = [
@@ -852,7 +852,19 @@ def _ticket_answer(ticket: Any) -> str:
         details.append(f"The problem is in {ticket.prb_phase or ticket.rca_phase or 'its current'} analysis phase with risk {ticket.risk_level or 'not recorded'}.")
     elif ticket.type == "CHG":
         details.append(f"The change is in {ticket.chg_phase or ticket.cab_status or 'its current'} phase with risk {ticket.risk_level or 'not recorded'}.")
-    details.extend([f"Latest update: {latest}", f"Recommended next step: {ticket.ai_resolution_summary or ticket.ai_resolution_guide}"])
+    details.extend([f"Latest update: {latest}"])
+    actions = list(getattr(ticket, "ai_resolution_steps", []) or [])
+    if actions:
+        details.extend(["", "Resolution actions from the canonical ticket plan:"])
+        for index, step in enumerate(actions[:5], start=1):
+            action = str(step.get("action", "")).strip()
+            why = str(step.get("why", "")).strip()
+            if action:
+                details.append(f"{index}. {action}" + (f" — {why}" if why else ""))
+    else:
+        guide = str(getattr(ticket, "ai_resolution_summary", "") or getattr(ticket, "ai_resolution_guide", "")).strip()
+        if guide:
+            details.extend(["", f"Resolution guidance recorded in the backend: {guide}"])
     return "\n\n".join(details)
 
 
@@ -983,7 +995,9 @@ def _ticket_priority_rank(ticket: Any) -> int:
 
 
 def _is_at_risk(ticket: Any) -> bool:
-    return is_sla_at_risk(ticket)
+    # Keep this defensive exclusion here as well as in the shared model
+    # helper. A breached item must never leak into the at-risk queue.
+    return not is_sla_breached(ticket) and is_sla_at_risk(ticket)
 
 
 def _dashboard_filtered_tickets(query_text: str) -> tuple[list[Any], dict[str, object]]:
@@ -1121,56 +1135,44 @@ def _active_ticket_list_answer(query_text: str) -> tuple[str, list[str]]:
     return "\n".join(lines), [ticket.number for ticket in tickets]
 
 
-def _is_breached_ticket_list_request(query_text: str, history: list[dict[str, str]] | None = None) -> bool:
-    """Recognise a direct or contextual request to enumerate SLA breaches."""
+def _is_sla_scoped_ticket_list_request(query_text: str) -> bool:
+    """Recognise scoped at-risk or breach requests before the KPI route.
 
-    query = query_text.casefold()
-    # A quantified SLA question is an executive metric, not an enumeration.
-    # Keep it on the canonical Stats + chart route even when it contains the
-    # words "what", "tickets", and "breached".
-    if re.search(r"\b(?:how\s+many|count|number\s+of|total)\b", query):
+    A group or assignee after "at risk" / "SLA breach" is an operational
+    queue request even when the user does not explicitly add the word
+    "tickets".  This keeps the answer focused on the requested owner rather
+    than returning the global SLA-health aggregate.
+    """
+
+    filters = _dashboard_query_filters(query_text)
+    if filters["sla_mode"] not in {"at_risk", "breached"} or filters["asks_for_count"]:
         return False
-    mentions_breach = "breach" in query
-    # Direct requests such as "Breached tickets in Basis" omit a leading
-    # interrogative, but the plural record noun still unambiguously asks for a
-    # list. Keep contextual pronouns for follow-up requests as well.
-    asks_to_list = bool(re.search(r"\b(which|what|show|list|these|those|name)\b", query)) or bool(
-        mentions_breach and re.search(r"\b(tickets?|incidents?|records?|work items?)\b", query)
-    )
-    history_text = " ".join(str(item.get("text", "")) for item in (history or [])[-6:]).casefold()
-    return asks_to_list and (mentions_breach or ("breach" in history_text and bool(re.search(r"\b(these|those|them)\b", query))))
+    return bool(filters["groups"] or filters["assignees"])
 
 
-def _breached_ticket_list_answer(query_text: str) -> tuple[str, list[str]]:
-    """Enumerate active SLA breaches within the canonical query scope."""
+def _sla_scoped_ticket_list_answer(query_text: str) -> tuple[str, list[str]]:
+    """List active at-risk or breached tickets with their live summaries."""
 
-    requested_modules = sorted(_requested_sap_modules(query_text))
-    breached = [
-        ticket for ticket in central_ticket_records().values()
-        if not _is_closed(ticket)
-        and ticket.type in {"INC", "RITM"}
-        and (ticket.is_breached or (ticket.sla_time_remaining is not None and ticket.sla_time_remaining <= 0))
-    ]
-    if requested_modules:
-        breached = [
-            ticket for ticket in breached
-            if set(ticket.sap_modules).intersection(requested_modules)
-        ]
-    priority_rank = {"1 - Critical": 1, "2 - High": 2, "3 - Moderate": 3, "4 - Low": 4}
-    breached.sort(key=lambda ticket: (priority_rank.get(ticket.priority, 9), ticket.sla_time_remaining or 0, ticket.number))
-    scope = f"{', '.join(requested_modules)}" if requested_modules else "Enterprise"
-    if not breached:
-        return f"There are no active SLA-breached INC or RITM records in the {scope} module scope.", []
+    tickets, filters = _dashboard_filtered_tickets(query_text)
+    mode = str(filters["sla_mode"])
+    label = _dashboard_filter_label(filters)
+    mode_label = "at-risk" if mode == "at_risk" else "breached"
+    scope_parts = [*list(filters["groups"]), *list(filters["assignees"])]
+    scope = ", ".join(scope_parts) if scope_parts else "the requested scope"
+    if not tickets:
+        return f"I found no active SLA-{mode_label} INC or RITM records for {scope} in the canonical ServiceNow queue.", []
+
     lines = [
-        f"{scope} SLA-Breached Tickets ({len(breached)})",
+        f"{label} Tickets ({len(tickets)})",
         "",
-        "These results are filtered directly from canonical ticket SAP-module tags.",
+        f"Active SLA-{mode_label} tickets for {scope}. Each item is filtered from the canonical assignment and SLA fields.",
         "",
+        "Ticket summaries",
     ]
-    for index, ticket in enumerate(breached, start=1):
+    for index, ticket in enumerate(tickets, start=1):
         lines.extend(_ticket_detail_block(ticket, index))
         lines.append("")
-    return "\n".join(lines), [ticket.number for ticket in breached]
+    return "\n".join(lines), [ticket.number for ticket in tickets]
 
 
 def _is_ewm_queue_lock_question(query_text: str) -> bool:
@@ -1690,6 +1692,17 @@ def _single_ticket_deep_dive(
         lines.extend(_latest_journal_lines(getattr(ticket, "work_notes", None), empty_label="- No work notes recorded."))
         lines.append("### Three most recent comments")
         lines.extend(_latest_journal_lines(getattr(ticket, "comments", None), empty_label="- No comments recorded."))
+    resolution_steps = list(getattr(ticket, "ai_resolution_steps", []) or [])
+    if resolution_steps:
+        lines.append("### Backend resolution actions")
+        for index, step in enumerate(resolution_steps[:5], start=1):
+            action = str(step.get("action", "")).strip()
+            why = str(step.get("why", "")).strip()
+            if action:
+                lines.append(f"{index}. {action}" + (f" | Why: {why}" if why else ""))
+    elif getattr(ticket, "ai_resolution_summary", "") or getattr(ticket, "ai_resolution_guide", ""):
+        lines.append("### Backend resolution guidance")
+        lines.append(str(getattr(ticket, "ai_resolution_summary", "") or getattr(ticket, "ai_resolution_guide", "")))
     return "\n".join(lines)
 
 
@@ -1776,7 +1789,11 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
     """Prepare one read-only RAG execution plan for JSON or SSE delivery."""
 
     dashboard_filters = _dashboard_query_filters(query_text)
-    metrics_requested = _is_metrics_intent(query_text)
+    # A scoped SLA request is a queue lookup, not a global health/KPI query.
+    # Detect it before the generic metrics classifier, whose broad SLA terms
+    # would otherwise replace the requested ticket list with the aggregate.
+    sla_scoped_ticket_list_requested = _is_sla_scoped_ticket_list_request(query_text)
+    metrics_requested = _is_metrics_intent(query_text) and not sla_scoped_ticket_list_requested
     fds_requested = _is_fds_generation_request(query_text)
     # Metrics are already fully grounded in the canonical Stats aggregation;
     # three retrieval chunks are enough for an optional natural-language
@@ -1806,6 +1823,17 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
     stats_context: str | None = None
     chart_data: dict[str, object] | None = None
     metric_answer: str | None = None
+    canonical_answer: str | None = None
+    canonical_answer_model: str | None = None
+    if sla_scoped_ticket_list_requested:
+        canonical_answer, _ = _sla_scoped_ticket_list_answer(query_text)
+        canonical_answer_model = "canonical-live-ticket-filter"
+    elif direct_tickets:
+        # Direct ticket lookups always include ticket-specific remediation when
+        # it is present in the backend. This avoids relying on generation to
+        # decide whether an operator needs the next safe resolution action.
+        canonical_answer = "\n\n---\n\n".join(_ticket_answer(ticket) for ticket in direct_tickets)
+        canonical_answer_model = "canonical-ticket-resolution-plan"
     if metrics_requested:
         live_stats = _live_stats_snapshot(query_text, active_only=True)
         stats_context = _stats_context_block(live_stats)
@@ -1868,6 +1896,8 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         "listed_ticket_ids": [ticket.number for ticket in scoped_tickets],
         "stats_context": stats_context,
         "metric_answer": metric_answer,
+        "canonical_answer": canonical_answer,
+        "canonical_answer_model": canonical_answer_model,
         "chart_data": chart_data,
         "fds_standard_context": fds_context,
         "sources": _sources(chunks),
@@ -1895,6 +1925,14 @@ def hybrid_rag_metadata(plan: dict[str, Any]) -> dict[str, Any]:
 
 async def stream_hybrid_rag(plan: dict[str, Any]):
     """Yield model deltas; leave transport framing to the FastAPI route."""
+
+    if plan.get("canonical_answer"):
+        yield {
+            "type": "token",
+            "content": str(plan["canonical_answer"]),
+            "model_used": str(plan["canonical_answer_model"] or "canonical-grounded-response"),
+        }
+        return
 
     if plan.get("metric_answer"):
         yield {
@@ -1928,6 +1966,13 @@ async def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None
     """Ground every query, then send every healthy request to Ollama."""
 
     plan = prepare_hybrid_rag(query_text, history)
+    if plan.get("canonical_answer"):
+        return {
+            "answer": str(plan["canonical_answer"]),
+            **hybrid_rag_metadata(plan),
+            "model_used": str(plan["canonical_answer_model"] or "canonical-grounded-response"),
+            "fallback_reasoning": False,
+        }
     if plan.get("metric_answer"):
         return {
             "answer": str(plan["metric_answer"]),

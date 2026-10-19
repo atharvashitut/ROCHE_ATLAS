@@ -1,293 +1,268 @@
-# Roche ATLAS ITSM Co-Pilot — Data and Backend Architecture Specification
+# Roche ATLAS ITSM Co-Pilot — End-to-End Project Specification
 
-## Purpose
+## 1. Purpose and scope
 
-This specification describes how ATLAS stores, relates, serves, and retrieves operational data today. ATLAS is a read-only ITSM co-pilot PoC: it models ServiceNow work items, enterprise knowledge, operational analytics, topology, and RAG chat without writing back to ServiceNow or any connected system.
+ATLAS is a read-only ITSM co-pilot proof of concept for support operations. It combines a ServiceNow-style ticket catalogue, enterprise knowledge, operational analytics, ticket topology, and a grounded chat assistant. It helps L2/L3 engineers and support leads understand workload, SLA exposure, a ticket's evidence and relationships, and safe resolution actions.
 
-## Requirements
+ATLAS is advisory: it does not create, update, close, approve, or remediate records in ServiceNow, SAP, HP ALM, Veeva Vault, Google Drive, or any other external system.
 
-1. Maintain one canonical ticket dataset for Dashboard, Stats, topology, ticket drawer, AI analysis, and Chat.
-2. Maintain one canonical enterprise-knowledge dataset for ServiceNow KBAs, Veeva Vault SOPs, HP ALM defects, and Google Drive KT/SUDs.
-3. Resolve relationship views from current canonical records, not independently maintained embedded copies.
-4. Calculate metrics dynamically from canonical ticket fields and active filters.
-5. Build the vector index only from canonical ticket and knowledge data.
-6. Keep retrieval and generation available without API keys through deterministic fallbacks.
-7. Keep all integrations read-only in the PoC.
+## 2. Requirements
 
-## Current Storage Model
+### Functional
 
-### Canonical ticket repository
+1. Use one canonical ticket source for Dashboard, Stats, topology, ticket detail, AI insight, and Chat.
+2. Support `INC`, `RITM`, `PRB`, and `CHG` records, including ownership, SLA, journals, tasks, attachments, relationships, and resolution plans.
+3. Calculate all workload/SLA metrics in the backend from canonical ticket fields.
+4. Support grounded questions for ticket status, assignment groups, assignees, SAP modules, ServiceNow processes, and curated enterprise documents.
+5. Treat `at risk <assignment group|assignee>` and `SLA breach <assignment group|assignee>` as scoped ticket-list queries, not global SLA-health summaries.
+6. Include stored, ticket-specific resolution actions in direct ticket enquiries when backend data exists.
+7. Provide SAP Basis, SAP Security, SAP PLM, SAP EWM, and ServiceNow operational/runbook knowledge.
+8. Support long-form FDS, HP ALM test case, RCA, SOP, runbook, technical troubleshooting, and architecture answers.
+9. Provide both JSON and SSE chat APIs, with provenance metadata and graceful fallbacks.
 
-The PoC does not currently use PostgreSQL, ServiceNow, or another external transactional database at runtime. Ticket data is authored in `backend/app/models.py` as `MOCK_DB`, a dictionary of typed Pydantic `Ticket` objects.
+### Non-functional
 
-At model initialization, `register_ticket_records(MOCK_DB)` stores references to those same objects in `CENTRAL_TICKET_REPOSITORY` from `backend/app/central_db.py`.
+1. Run on an 8-vCPU/32-GB instance with seven Ollama threads and one CPU left for FastAPI/system work.
+2. Use an Ollama context window of 4,096 tokens.
+3. Use two output tiers: 350 tokens only for explicit brief operational lookups; 2,048 tokens for every other request.
+4. Remain usable without external AI credentials through local and deterministic fallbacks.
+5. Keep all connector behavior read-only.
+6. Do not create separate frontend fixtures, browser-computed metrics, or a second operational system of record.
 
-| Component | Role |
-| --- | --- |
-| `MOCK_DB` | Current authoring source for typed tickets |
-| `CENTRAL_TICKET_REPOSITORY` | Canonical runtime access boundary |
-| `central_ticket_records()` | Read-only `MappingProxyType` view used by APIs, RAG, stats, and agents |
-| `central_ticket_by_reference()` | Lookup by ATLAS ID, ServiceNow number, or `sys_id` |
+## 3. As-is architecture
 
-The repository uses an `RLock` for safe access and holds object references rather than a second ticket copy. Therefore `MOCK_DB` is the current source definition and the repository is the mandatory consumer path.
+```text
+React 19 + Vite browser
+  ├─ Stats: KPIs, charts, drill-down
+  ├─ Dashboard: ticket queue, drawer, activities, topology, sources
+  └─ Chat: streamed operational answers
+             │ REST + Server-Sent Events
+             ▼
+FastAPI / Uvicorn
+  ├─ main.py              API, ticket payloads, stats and advisory analysis
+  ├─ rag_engine.py        intent routing, exact filters, retrieval, prompting
+  ├─ models.py            typed tickets, SLA and relationship normalization
+  ├─ central_db.py        canonical knowledge and ticket access boundary
+  ├─ agent_intelligence.py explainable ticket/team recommendations
+  ├─ connectors.py        read-only source adapter contract
+  ├─ vector_store.py      Chroma/local retrieval
+  └─ ollama_client.py     async local model adapter
+       │                 │                 │
+       ▼                 ▼                 ▼
+ Canonical ticket     Knowledge registry   Derived Chroma vector index
+ repository           SAP + ServiceNow     (rebuildable, not authoritative)
+       │                                      │
+       └───────────── retrieval corpus ───────┘
+                         │
+                         ▼
+                Ollama daemon (Llama 3.2 3B; 1B fallback)
+                Optional Gemini generation/embeddings
+```
 
-### Canonical knowledge repository
+### Component ownership
 
-Enterprise documents are defined once in `backend/app/central_db.py` as `CENTRAL_KNOWLEDGE_DB`. Each `CentralKnowledgeRecord` contains:
-
-| Field | Meaning |
-| --- | --- |
-| `id` | Stable source ID, such as `KBA003192` or `GDRIVE-LEAP-SUD-204` |
-| `title` | Human-readable document name |
-| `source_type` | ServiceNow KBA, Veeva Vault SOP, HP ALM Defect, or Google Drive KT/SUD Hub |
-| `system` / `connector` | Source platform and connector route |
-| `url` | Current source link or future live integration link |
-| `summary` / `content` | Retrieval-ready source content |
-| `ticket_numbers` | Explicit record references |
-| `tags` | Deterministic relationship and retrieval keywords |
-
-`central_knowledge_records()` returns deep copies for connector ingestion, preventing adapters from mutating the canonical registry.
-
-### Derived stores
-
-These are derived views, never independent systems of record:
-
-| Derived artifact | Source |
-| --- | --- |
-| Ticket API payload | Canonical ticket repository plus calculated health, sentiment, SLA, and topology |
-| Stats response | Filtered canonical ticket records |
-| Topology snapshots | Canonical relationship IDs resolved at request time |
-| Vector corpus | Canonical tickets, journals, tasks, and knowledge documents |
-| Chroma collection | Rebuildable vector index of the canonical corpus |
-
-No Dashboard, Stats, or Chat component should own an operational ticket, assignee, assignment-group, or metric fixture.
-
-## Ticket Schema
-
-`Ticket` in `backend/app/models.py` represents the shared ServiceNow work-item shape for `INC`, `RITM`, `PRB`, and `CHG`.
-
-### Core fields
-
-| Area | Fields |
-| --- | --- |
-| Identity | `id`, `sys_id`, `number`, `type`, `record_type` |
-| Content | `short_description`, `title`, `description` |
-| Workflow | `state`, `priority`, `rca_phase`, `prb_phase`, `cab_status`, `chg_phase`, `risk_level` |
-| Ownership | `assignment_group`, `assigned_to` / `assignee`, `caller_id`, `requested_for` |
-| Classification | `category`, `business_service`, `sap_modules`, `resources`, `opened_on` |
-| SLA | `sla_status`, `sla_time_remaining`, `sla_remaining_minutes`, `sla_health`, `is_breached`, `hold_reason` |
-| Intelligence | `sentiment`, `similar_records`, `historical_tickets`, `ai_resolution_guide`, `ai_resolution_steps` |
-
-The Pydantic validator normalizes legacy aliases, fills PoC defaults, maps priority/state aliases, normalizes journals/tasks, derives SLA health, and enforces close-note rules.
-
-### Journals, tasks, and evidence
-
-| Entity | Storage field | Notes |
+| Layer | Technology | Responsibility |
 | --- | --- | --- |
-| Customer-visible journal | `comments: list[ServiceNowJournalEntry]` | `sys_journal_field` style author, timestamp, element, value, and `is_customer` |
-| Internal journal | `work_notes: list[ServiceNowJournalEntry]` | Internal support activity |
-| Attachments | `attachments` | Filename, media type, size, URL |
-| Change tasks | `ctasks` | CHG execution work |
-| Problem tasks | `ptasks` | PRB investigation work |
-| Catalog tasks | `sctasks` | RITM fulfillment work |
+| Web UI | React 19, Vite | Presentation only: Stats, Dashboard, Chat, drawer, drill-down, stream display. |
+| API | FastAPI, Uvicorn | REST/SSE endpoints, payload composition, backend analytics. |
+| Domain | Pydantic | Ticket validation, normalisation, SLA state, task/journal rules, topology. |
+| Operational data | In-memory repository | Canonical runtime ticket data. |
+| Knowledge | Curated Python registry | Canonical enterprise document metadata and content. |
+| Retrieval | Chroma/local fallback | Semantic evidence lookup from derived documents. |
+| AI | Ollama, optional Gemini | Grounded natural-language synthesis. |
 
-Active records and active tasks do not expose closure notes. Closed/resolved records expose them only when valid for their state.
+## 4. Frontend design and features
 
-## Relational Schema
+`frontend/src/App.jsx` provides the three product views:
 
-Relationships are ID-driven. Snapshot objects are generated only for display.
-
-```text
-                        parent_id
-            ┌─────────────────────────────────┐
-            │                                 ▼
-        Parent INC ── child_ids ──> Child INC (full canonical Ticket)
-            │
-            ├── linked_problem ──> PRB
-            │                        ├── originating_ticket_ids ──> INC/RITM records
-            │                        ├── ptasks
-            │                        └── linked_change ──> CHG
-            │                                                  ├── originating_ticket_ids
-            └── linked_change ─────────────────────────────────└── ctasks
-
-        RITM ── sctasks
-```
-
-### Incident
-
-- `parent_id` identifies a parent incident.
-- `child_ids` identifies canonical child incidents.
-- `linked_problem` and `linked_change` identify linked PRB/CHG records.
-- `resolve_child_tickets()` retrieves each child from its full canonical record. Parent and standalone child views therefore share the same comments and state.
-
-### Problem
-
-- `originating_ticket_ids` identifies one or more contributing INC/RITM records.
-- `ptasks` represent downstream investigation/remediation work.
-- `linked_change` identifies an implementation change when present.
-
-### Change
-
-- `originating_ticket_ids` identifies the requesting INC/PRB work.
-- `ctasks` are the only downstream execution tasks.
-- A CHG never treats child incidents as downstream tasks.
-
-`_enrich_relationship_topology()` validates these type-specific relationship rules at model initialization. `_relationship_snapshot()` creates compact topology nodes, not independently stored ticket copies.
-
-## Backend Data Flow
-
-```text
-Canonical Ticket Repository ─────┬──> /api/dashboard/tickets ──> Dashboard
-                                 ├──> /api/dashboard/stats ────> Stats
-                                 ├──> /api/tickets/{reference} ─> Drawer / topology
-                                 └──> RAG hydration + agents ───> /api/chat/query ─> Chat
-
-Canonical Knowledge Registry ────> Connector adapters ─────────> Vector corpus ──> RAG retrieval
-```
-
-### Dashboard
-
-The Dashboard fetches `/api/dashboard/tickets` and `/api/dashboard/assignment-groups`.
-
-- Groups, review-team defaults, and assignees come from backend repository data.
-- Ticket filters, ordering, drawer hydration, anomaly popups, and assignee briefings consume API data.
-- Full drawer records are retrieved via `/api/tickets/{ticket_id}` when required.
-
-### Stats
-
-`/api/dashboard/stats` applies assignment-group, assignee, and date filters before calculating all KPIs and chart datasets:
-
-- State, type, SLA, on-hold-reason, team, and assignee counts
-- Work-item trends and SLA ownership
-- Team status-call summaries
-- Anomaly detection and advisory analyses
-- A compact API-generated `ticket_index` for chart drill-down
-
-The browser does not calculate alternative KPI totals. Chart clicks hand API-provided IDs to Dashboard drill-down.
-
-### Chat
-
-`POST /api/chat/query` calls `query_hybrid_rag()`.
-
-1. Intent routing recognizes ticket IDs, assignees, assignment groups, operational ticket lists, and known SOP topics.
-2. Hybrid retrieval selects canonical vector and lexical evidence.
-3. Ticket references are hydrated from the canonical repository immediately before response generation.
-4. Gemini is used when configured; otherwise bounded local generation and deterministic grounded synthesis preserve availability.
-5. Chat returns clean text only; it does not embed the ticket drawer, journals, topology, or source-card UI.
-
-Assignee and assignment-group questions are answered directly from the live canonical ticket fields, so a small local model cannot omit or invent workload details.
-
-### Chat Data Provenance and Hard-Coding Boundaries
-
-Chat does not render a separate static ticket list. The request path is:
-
-```text
-Chat.jsx → POST /api/chat/query → query_hybrid_rag()
-         → canonical ticket lookup / live Stats aggregation / vector retrieval
-         → clean text response returned to Chat.jsx
-```
-
-The following content is dynamically read at request time from canonical backend stores:
-
-| Question category | Runtime source | Examples |
+| View | Main components | Function |
 | --- | --- | --- |
-| Exact ticket status | `CENTRAL_TICKET_REPOSITORY` | state, assignee, SLA, comments, relationships, suggested next step |
-| Assignee or assignment-group queue | Canonical ticket fields | workload, breached/at-risk order, latest journal, linked records |
-| Dashboard/Stats metrics | `get_dashboard_stats()` over canonical tickets | totals, breaches, on-hold reasons, anomaly inputs, workload |
-| SAP-module questions | Canonical `ticket.sap_modules` tags | SAP BASIS/PLM/EWM scoped counts and ticket lists |
-| Enterprise procedures | `CENTRAL_KNOWLEDGE_DB` → vector corpus | ServiceNow KBA, Veeva SOP, HP ALM, Google Drive SUD evidence |
+| Stats | `Stats.jsx` | API-calculated KPIs, SLA/state/type/team charts and drill-down. |
+| Dashboard | `Dashboard.jsx`, `TicketCard.jsx`, `WorkItemActivities.jsx`, `TopologyTree.jsx`, `KnowledgeReferences.jsx` | Queue, detailed record, journal/activity, relationships, evidence, AI insight. |
+| Chat | `Chat.jsx` | Prompt shortcuts, streamed responses, source metadata, inline SLA chart display. |
 
-Current PoC limitations must remain explicit:
+`frontend/src/api.js` is the sole browser API boundary. It parses REST responses and SSE events from `/api/chat/stream`. The browser does not calculate alternative KPI values. Theme selection in `localStorage` is presentation-only; chat history is sent as a bounded, non-persistent context window.
 
-1. `MOCK_DB` and `CENTRAL_KNOWLEDGE_DB` are manually authored demo data. They are canonical inside ATLAS, but not live ServiceNow/Veeva/ALM/Drive data yet.
-2. The approved local Llama model is **not trained or fine-tuned** on the ATLAS corpus. It is grounded at runtime through retrieval. Gemini remains an optional future provider.
-3. `rag_engine.py` contains deterministic intent rules and response-formatting helpers. In particular, known high-value SOP topics have curated action sequences to preserve accuracy when an LLM is unavailable or exceeds its timeout. These are code templates, not learned model output.
-4. The Chat welcome text and CR/RCA quick-action labels are UI text constants only; they are not operational data.
-5. The vector index is used for evidence retrieval, never as authority for current ticket state. Ticket/Stats answers must always hydrate final values from the canonical ticket repository.
+## 5. Backend technical analysis
 
-### Required Chat Correctness Rules
+### API and analytics — `backend/app/main.py`
 
-1. Every scoped metric/list response must apply all recognized query filters before formatting a result.
-2. SAP module scope must be derived from `Ticket.sap_modules`; assignment-group scope must be derived from `Ticket.assignment_group`; assignee scope must be derived from `Ticket.assigned_to`.
-3. Chat must never imply it inherits a Dashboard browser selection unless that selection is explicitly supplied in the request payload.
-4. Responses must label the actual data scope used, such as `SAP BASIS module scope` or `full canonical enterprise reporting scope`.
-5. Ticket IDs, counts, comments, status, and relationships must be derived from canonical records—not embedded in response strings.
+Main responsibilities:
 
-## Vector RAG Architecture
+- Starts vector indexing and non-blocking Ollama diagnostics.
+- Serves `/api/dashboard/tickets`, `/api/dashboard/assignment-groups`, `/api/dashboard/stats`, `/api/tickets/{ticket_id}`, `/api/knowledge/sources`, `/api/rag/status`, `/api/chat/query`, and `/api/chat/stream`.
+- Creates canonical ticket payloads, including topology, SLA/breach reason, sentiment, knowledge, and AI insight.
+- Calculates dashboard statistics from filtered ticket records, not browser state.
+- Adds deterministic module-aware diagnostic actions (for example, SM12/SMQ1/SMQ2 for EWM; SU53 for Security; SM37/ST22 for Basis).
 
-`backend/app/vector_store.py` produces a `RetrievalDocument` for each:
+### Domain and ticket model — `backend/app/models.py`
 
-- Knowledge document
-- Ticket overview, including assignment, caller, service, SLA, relationships, and configuration context
-- Ticket journal stream
-- Ticket task stream
+`Ticket` is the shared Pydantic shape for incidents, requests, problems, and changes. It contains identity, descriptions, state, priority, assignee/group, caller, SAP modules, SLA values, hold reason, journals, attachments, task lists, relations, knowledge references, and `ai_resolution_steps`.
 
-Each chunk carries source system/connector metadata plus `ticket_id`, `ticket_number`, `assignment_group`, `module`, `record_type`, and `section` where relevant.
+The model validator normalizes legacy aliases, priority/state formats, journal/task shapes, close-note rules, SLA state, and relationship topology. The shared SLA predicates define:
 
-`LocalVectorStore` persists a Chroma collection at `backend/.atlas-vector-db` by default. Its corpus fingerprint uses document ID, content, and URL. On canonical content change, ATLAS re-syncs the collection, preventing stale chunks.
+- **Breached:** SLA-tracked INC/RITM with explicit breach or zero/negative remaining time.
+- **At risk:** non-breached SLA-tracked INC/RITM with positive remaining time inside the configured 90-minute warning buffer.
+- **On track:** SLA-tracked work outside the warning buffer.
 
-| Condition | Embedding / retrieval behavior |
+### Canonical data boundary — `backend/app/central_db.py`
+
+`CENTRAL_TICKET_REPOSITORY` exposes a read-only `MappingProxyType` over the typed ticket catalogue registered from `MOCK_DB` in `models.py`. `CENTRAL_KNOWLEDGE_DB` holds curated documents with ID, title, source type, system, connector, URL, content, linked tickets, and tags.
+
+This means the current runtime has no PostgreSQL, MySQL, or cloud transactional database. Tickets and documents are source-controlled Python data, loaded in memory at application start. It is correct for a demonstrator but not a multi-user production persistence design.
+
+### Query orchestration — `backend/app/rag_engine.py`
+
+The RAG engine:
+
+1. Parses ticket IDs, groups, assignees, SAP modules, priorities, states, hold reasons, record types, and SLA wording.
+2. Hydrates current tickets from the canonical repository.
+3. Calculates KPI answers through the same stats aggregation as the Stats tab.
+4. Returns deterministic responses for exact data: metrics, scoped at-risk/breach ticket lists, and direct ticket resolution plans.
+5. Retrieves procedural/knowledge evidence when a generative answer is appropriate.
+6. Builds a bounded grounded prompt and invokes Ollama.
+7. Falls back to retrieved or deterministic guidance when inference is unavailable.
+
+The direct-ticket path includes resolution actions from `Ticket.ai_resolution_steps`; it only gives generic guidance when no ticket-specific plan is present. Scoped SLA queue entries contain number, summary, priority/state, owner, SLA condition, latest update, related records, and suggested next action.
+
+### Explainable intelligence — `agent_intelligence.py`
+
+This is rules-based operational analysis, not an opaque ML model. It evaluates SLA urgency, customer comments, pending tasks, dependencies, historical/similar records, and workload to create explainable findings and recommendations for tickets, assignees, and groups.
+
+## 6. Database and data utilisation
+
+| Store | Implementation | Authority | Consumers |
+| --- | --- | --- | --- |
+| Ticket catalogue | Typed `MOCK_DB` registered in an in-memory repository | Current source of truth for operations | Dashboard, Stats, ticket detail, topology, agents, Chat. |
+| Knowledge catalogue | `CENTRAL_KNOWLEDGE_DB` | Current source of truth for curated documentation | Retrieval, sources API, ticket knowledge references. |
+| Vector index | Chroma under `backend/.atlas-vector-db` by default | Derived and rebuildable only | RAG retrieval. |
+| Browser storage | `localStorage` | Theme preference only | UI. |
+| Chat transcript | Request payload, max 12 messages | Ephemeral follow-up context only | Chat. |
+
+### Relationship model
+
+```text
+Parent INC ── child_ids ──> Child INC
+    ├── linked_problem ──> PRB ── ptasks
+    │                         └── linked_change ──> CHG ── ctasks
+    └── linked_change ────────────────────────────────┘
+
+RITM ── sctasks
+```
+
+Relationships are IDs resolved from canonical records at request time. This prevents parent views, child views, and Chat from holding conflicting copies of a record's state or journals.
+
+### Retrieval index
+
+`vector_store.py` indexes knowledge documents plus ticket overviews, journal streams, and task streams. Metadata includes ticket ID/number, assignment group, module, record type, source system, source URL, and document section. A content fingerprint resynchronizes the index when the canonical corpus changes.
+
+| Condition | Embedding/retrieval behavior |
 | --- | --- |
-| `GEMINI_API_KEY` configured | Gemini embeddings |
-| No Gemini key | Deterministic 256-dimension local hash embeddings |
-| Chroma unavailable | In-process vector-map fallback |
+| Gemini configured and available | Gemini `gemini-embedding-001` embeddings. |
+| Gemini unavailable | Deterministic local 256-dimension hash embeddings. |
+| Chroma unavailable | In-process vector-map similarity fallback. |
 
-The vector store is derived and rebuildable. It is never the authority for ticket state or source documents.
+The vector index is never the authority for ticket state, SLA, assignee, or KPI counts; those always come from the canonical ticket repository.
 
-## Connector Architecture
+## 7. AI, RAG, and output policy
 
-`backend/app/connectors.py` defines a read-only connector contract. Current adapters read canonical mock records for:
+| Capability | Implementation | Purpose |
+| --- | --- | --- |
+| Primary generation | Ollama `llama3.2:3b` | Local grounded responses. |
+| Local fallback | Ollama `llama3.2:1b` | Secondary local generation model. |
+| Optional remote fallback | Gemini client | Used only after local generation fails when configured. |
+| Embeddings | Gemini or local hash | Retrieval vector creation. |
+| Exact operational answers | Python calculations/formatters | Prevents fabricated counts, ticket details, and plans. |
+| Advisory intelligence | Explainable Python rules | Ticket/team recommendations. |
 
-- ServiceNow ITSM
-- Veeva Vault QMS
-- HP ALM Quality Center
-- Google Drive KT Hub
+The models are not fine-tuned on ATLAS data. They are grounded at runtime. Deterministic paths deliberately take precedence whenever backend data already answers the question exactly.
 
-Future integrations are prepared through environment-variable placeholders:
+```text
+Question → intent/filter parser → canonical ticket/stat lookup + vector retrieval
+         → deterministic answer OR grounded prompt → Ollama stream
+         → optional Gemini fallback → JSON/SSE with sources and retrieval metadata
+```
 
-- `SERVICENOW_INSTANCE_URL`, `SERVICENOW_CLIENT_ID`, `SERVICENOW_CLIENT_SECRET`
-- `VEEVA_VAULT_URL`, `VEEVA_CLIENT_ID`, `VEEVA_CLIENT_SECRET`
-- `HP_ALM_BASE_URL`, `HP_ALM_CLIENT_ID`, `HP_ALM_CLIENT_SECRET`
-- `GOOGLE_DRIVE_FOLDER_ID`, `GOOGLE_APPLICATION_CREDENTIALS`
-- `GEMINI_API_KEY`
+| Query class | Maximum output | Examples |
+| --- | --- | --- |
+| Explicit brief operational lookup | 350 tokens | Ticket status, priority, assignee status, SLA status, basic count. |
+| All other requests | 2,048 tokens | FDS, test case, RCA, SOP, runbook, troubleshooting, architecture, explanation. |
 
-No connector writes tickets, documents, approvals, tasks, or changes.
+Complex work receives 2,048 tokens by default; it is not required to prove it needs a larger budget.
 
-## Constraints
+## 8. Runtime and configuration
 
-1. Canonical ticket data is currently in process memory and is reloaded from Python definitions on restart.
-2. Canonical knowledge is currently source-controlled Python data, not a live document-management integration.
-3. Chroma contains only derived vectors and metadata.
-4. Gemini and the local model are optional; deterministic responses must remain operational without either.
-5. API and connector behavior is read-only for this PoC.
-6. Compatibility aliases may remain during migration, but new work must use the canonical ServiceNow-style fields.
-7. New UI code must not introduce independent operational fixtures or embedded child-journal copies.
+`start.sh` starts or reuses Ollama, creates/uses `.venv`, installs missing backend/frontend dependencies, starts FastAPI on port 8000, and starts Vite on port 5173. It stores runtime PID/log files in a temporary per-user directory, outside the Git worktree.
 
-## Production Transition Plan
+| Variable | Default/target | Meaning |
+| --- | --- | --- |
+| `ATLAS_OLLAMA_NUM_THREAD` | `7` | Seven of eight vCPUs for inference. |
+| `ATLAS_OLLAMA_NUM_CTX` | `4096` | Model context window. |
+| `ATLAS_OLLAMA_MAX_TOKENS` | `2048` | Full/default budget. |
+| `ATLAS_OLLAMA_STANDARD_MAX_TOKENS` | `350` | Brief lookup budget. |
+| `ATLAS_OLLAMA_NUM_BATCH` | `512` | CPU inference batch size. |
+| `ATLAS_OLLAMA_TIMEOUT_SECONDS` | `600` | Generation read-gap timeout. |
+| `ATLAS_SLA_WARNING_BUFFER_MINUTES` | `90` | Shared SLA at-risk threshold. |
 
-1. Replace `MOCK_DB` registration with a read-only ServiceNow repository adapter or a replicated relational store.
-2. Persist normalized tickets, journals, tasks, relationships, attachments, and knowledge sources in a managed database.
-3. Add connector sync jobs with source timestamps, source IDs, idempotency keys, and audit history.
-4. Preserve `CentralTicketRepository` as the consumer interface so APIs, stats, topology, and RAG do not require broad rewrites.
-5. Keep vector chunks derived from normalized data; version and refresh them by source revision.
-6. Store connector credentials in an approved secret manager, enforce least privilege, and apply user/team authorization at repository-query time.
-7. Monitor connector freshness, vector-index freshness, retrieval quality, latency, and fallback usage.
+Ollama owns model memory in a separate process; FastAPI only sends bounded HTTP requests. This avoids loading model weights into the web process.
 
-## Implementation Steps for Future Data Changes
+## 9. Security, compliance, and limitations
 
-1. Modify tickets only in the canonical ticket authoring source, then register/rebuild the repository.
-2. Modify documents only in the canonical knowledge source or its future sync adapter.
-3. Express relationships through `parent_id`, `child_ids`, `originating_ticket_ids`, `linked_problem`, and `linked_change`.
-4. Verify Dashboard and Stats through backend API outputs before adjusting presentation code.
-5. Rebuild the vector corpus and test ticket, assignee, group, SOP, and no-match chat queries.
-6. Do not add browser fixtures or duplicate relationship data.
+1. The current records are curated/mock PoC data, not live production data.
+2. Connectors are read-only and currently act as an integration-ready contract rather than live synchronized clients.
+3. AI output is advisory. SAP ownership, approved change control, CAB/GxP controls, and validation evidence remain mandatory.
+4. Production requires SSO/RBAC, audit logging, secret-manager integration, encryption, retention controls, data classification, and approved hosting.
+5. Chroma can contain locally indexed operational text and must receive equivalent controls in production.
+6. There is currently no persistent relational database, connector scheduler, tenant model, durable audit trail, or automated write-back/remediation.
+7. Cache/vector data, `.venv`, Python caches, and temporary logs must not be committed.
 
-## Success Criteria
+## 10. Current feature inventory
 
-- The same ticket state, journals, assignee, SLA, and relationships appear in Dashboard, Stats drill-down, drawer, and Chat.
-- Parent incident child views show the same journal as the standalone child record.
-- Stats counts equal their corresponding filtered canonical ticket set.
-- Assignee and assignment-group Chat questions resolve from canonical ticket data.
-- SOP/KBA queries retrieve the correct central knowledge source.
-- The vector store can be rebuilt entirely from canonical ticket and knowledge records.
-- No consumer component or AI layer becomes a second system of record.
+- Dashboard queue with filters and detailed ticket drawer.
+- Stats/KPI analytics with drill-down.
+- SLA health, on-track, at-risk, and breached classification.
+- Scoped at-risk and breach lists by assignment group or assignee.
+- Direct ticket status, journals, topology, related work, knowledge references, and stored remediation actions.
+- Customer sentiment and explainable workload/ticket insights.
+- ServiceNow and SAP Basis/Security/PLM/EWM procedural retrieval.
+- FDS/procedure/test-case long-form generation context.
+- Chroma-backed retrieval with offline local fallback.
+- Streaming chat and non-streaming compatibility endpoint.
+
+## 11. Implementation plan
+
+### Maintain the current PoC
+
+1. Add/modify tickets only in the canonical ticket authoring source, then register/rebuild the repository.
+2. Add/modify documents only in `CENTRAL_KNOWLEDGE_DB`, with stable ID, source metadata, tags, links, and safe steps.
+3. Add dashboard/chat filters in the shared backend filter functions so Stats, Dashboard, and Chat stay consistent.
+4. Classify each new question path as exact canonical, calculated analytics, or generative RAG before implementing it.
+5. Rebuild/retest retrieval after canonical data changes.
+6. Keep frontend changes presentation-only.
+
+### Move toward production
+
+1. Replace in-code fixtures with authenticated, read-only ServiceNow/knowledge source synchronization or a replicated normalized database.
+2. Persist tickets, journals, tasks, relationships, attachments, source revisions, and document metadata.
+3. Add idempotent sync jobs, freshness telemetry, source timestamps, and audit history.
+4. Keep the central repository interface so API, analytics, topology, and RAG consumers need minimal rewrites.
+5. Version vector documents by source revision and implement incremental reindexing.
+6. Add enterprise security, encryption, retention, RBAC, monitoring, automated tests, and operational dashboards.
+
+## 12. Success criteria
+
+### PoC
+
+- Every view shows the same canonical ticket state, ownership, SLA, journals, and relationships.
+- Stats totals equal the filtered ticket set used to calculate them.
+- `SLA health <scope>` gives the scoped aggregate; `at risk <scope>` and `SLA breach <scope>` list only matching active INC/RITM tickets.
+- Direct ticket queries return current canonical status plus ticket-specific resolution actions when stored.
+- Procedures retrieve relevant central knowledge and expose source metadata.
+- FDS/procedural questions use the 2,048-token profile and 4,096-token context; basic status lookups use 350 tokens.
+- The application has documented local fallbacks when Gemini, Chroma, or Ollama is unavailable.
+
+### Production readiness
+
+- Source synchronization is authenticated, read-only, auditable, and measurably fresh.
+- Security, data lifecycle, and GxP/operational advisory controls are approved.
+- Automated regression tests cover SLA routing, ticket relationships, data provenance, retrieval relevance, and connector contracts.

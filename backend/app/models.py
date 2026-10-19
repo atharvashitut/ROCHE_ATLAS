@@ -238,7 +238,8 @@ class Ticket(BaseModel):
             self.prb_phase = self.prb_phase or ("RCA" if self.rca_phase else "Assess")
         if self.type == "CHG":
             self.chg_phase = self.chg_phase or {"Scheduled": "Schedule", "Implement": "Implement", "Authorize": "Authorize", "Review": "Review", "Closed": "Closed"}.get(self.state, "Assess")
-        self.knowledge_refs = central_knowledge_references(self.number, self.title) or self.knowledge_refs or _knowledge_references(self.number, self.title)
+        reference_context = f"{self.title} {self.short_description} {self.description}"
+        self.knowledge_refs = central_knowledge_references(self.number, reference_context) or self.knowledge_refs or _knowledge_references(self.number, self.title)
         self.ai_resolution_guide = self.ai_resolution_guide or (
             f"Confirm the reported impact, execute the approved remediation for {self.title}, "
             "validate service recovery with the requester, and document the evidence in work notes."

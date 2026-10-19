@@ -9,6 +9,7 @@ the same source metadata.
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, Mapping, TypedDict
@@ -123,18 +124,6 @@ CENTRAL_KNOWLEDGE_DB: tuple[CentralKnowledgeRecord, ...] = (
         "content": "SAP PLM classification synchronization defect, SolMan alert suppression, SAP EWM monitoring, and job-monitoring triage guidance.",
         "ticket_numbers": ["INC0048125"],
         "tags": ["sap", "plm", "classification", "alm", "defect", "solman"],
-    },
-    {
-        "id": "ALM-TS-SAP-SEC-PFCG-001",
-        "title": "SAP PFCG Role & Authorization Validation",
-        "source_type": "HP ALM Test Specification",
-        "system": "HP ALM",
-        "connector": "HP ALM",
-        "url": "https://alm.roche.com/qcbin/test-specifications/ALM-TS-SAP-SEC-PFCG-001",
-        "summary": "GxP Operational Qualification specification for SAP PFCG role, authorization, organizational-boundary, segregation-of-duties, and privileged-access validation.",
-        "content": """Document ID ALM-TS-SAP-SEC-PFCG-001. SAP PFCG Role & Authorization Validation for SAP S/4HANA or ECC in a GxP-regulated environment. Regulatory baseline: 21 CFR Part 11, EU Annex 11, and GAMP 5 Category 4. Lifecycle phase: Operational Qualification. Traceability: URS-SEC-AUT-041 and FS-SEC-ROLE-012.\n\nTC_PFCG_001 Positive functional authorization and activity validation: create TEST_USER_DISP in SU01 and assign role Z_MM_PURCHASER_DISP, generated in PFCG with an active green profile. In the test client confirm master data MAT-100293 and PO 4500001201. Log on as TEST_USER_DISP and capture System Status or /nSU01D showing the user and client. Execute /nME23N for PO 4500001201. Verify display succeeds; attempt Toggle Display to Change with F7. Change must remain blocked with message ME 155. Run /nSU53 immediately and verify ACTVT 03 display is allowed while ACTVT 02 change fails for object M_BEST_BSA. Capture the full SU53 authorization buffer.\n\nTC_PFCG_002 Negative access gate and failure-buffer validation: assign TEST_USER_OPS the Z_PP_OPERATOR operational role without SPRO, FB60, or PFCG access. Execute /nSPRO and verify denial message 00 172. Run /nSU53 and confirm a failed S_TCODE check for TCD SPRO. Attempt /nSE16 or /nSE16N for table T001; direct Data Browser access must be denied. Run /nSU53 again and confirm S_TABU_DIS failure with DICBERCLS and ACTVT 03.\n\nTC_PFCG_003 Organizational-level boundary enforcement: assign TEST_USER_PLANT1000 role Z_QM_INSPECTOR_1000 restricted to WERKS 1000. In /nQA33 search Plant 1000 and open inspection lot 100000045. Search Plant 2000 and verify zero records or message QE 018. Attempt /nQA03 for lot 200000088 in Plant 2000; navigation must be denied. Use /nSU53 to evidence the failing Q_INSP_PLN or Q_INSPOPER authorization check for WERKS 2000.\n\nTC_PFCG_004 Segregation of duties and toxic-pair exclusion: configure rule SOD-PTP-004 for purchasing ME21N versus invoice verification MIRO. Assign Z_MM_PO_CREATOR to TEST_USER_SOD and verify a purchase order can be drafted. Attempt to assign Z_FI_AP_INVOICE_PROCESSOR using SU01, PFCG, or GRC Access Request. The system must raise the critical preventive SoD conflict SOD-PTP-004 and require a mitigation control ID. Without approved mitigation, /nMIRO must be denied.\n\nTC_PFCG_005 Restricted table maintenance and debugging lockdown: assign TEST_USER_PROD role Z_PROD_CORE_USER in the validation or quality client. Run /nSM30 for V_T001 and verify S_TABU_DIS prevents table-view maintenance. Run /nSE16N, activate debugging with /h, and query MARA; field-value editing must remain locked because S_DEVELOP does not allow OBJTYPE DEBUG with ACTVT 02. In an administrator session, use /nSUIM > Roles > By Authorization Values for Z_PROD_CORE_USER and confirm no role contains S_TABU_CLI cross-client table-maintenance authority.\n\nHP ALM execution and evidence standard: every screenshot must show the full SAP GUI window and visible SID, client number, user name, and server time. An unexpected pass on a negative test is a Severity 1 Critical GxP Data Integrity Breach, linked to its test step and assigned to the Security Role Author. In HP ALM Test Lab, a tester digitally signs the formal run by moving it from Not Completed to In Progress to Passed using domain credentials against the approved release baseline.""",
-        "ticket_numbers": ["INC0048103", "INC0048104", "PRB0031022", "CHG0092100"],
-        "tags": ["sap", "security", "pfcg", "authorization", "su53", "sod", "hp-alm", "gxp", "s_tcode", "s_tabu_dis", "s_develop"],
     },
     {
         "id": "GDRIVE-SUD-109",
@@ -296,7 +285,7 @@ CENTRAL_KNOWLEDGE_DB += (
         "summary": "Controlled authoring standard for production-grade SAP EWM Functional Design Specifications with build-ready logic, data mappings, validation controls, and HP ALM traceability.",
         "content": """FDS-EWM-001 is the controlled authoring standard for SAP Extended Warehouse Management functional designs and integrations with MM, QM, SD, and PP. It applies to Enhancements, Interfaces, Reports, Forms, Conversions, and Custom RF Transactions. An FDS must give ABAP development unambiguous functional logic, database mappings, validation criteria, exception handling, security requirements, and direct HP ALM traceability.\n\nSection 1 Document Header and Control: provide a structured Document ID such as FDS-EWM-RICEFW_TYPE-SEQUENCE; a specific business-process title; RICEFW classification; traceability identifiers for the User Requirement Specification, ServiceNow Change, and HP ALM Requirement; GxP regulated and 21 CFR Part 11 applicability flags; GAMP 5 Category 4 configured or Category 5 custom classification; and target SAP S/4HANA EWM environment, stating embedded or decentralized deployment.\n\nSection 2 Business Context and Scope: state the operational or regulatory problem, current AS-IS standard SAP behaviour or manual workaround, and the automated TO-BE outcome. Define warehouse scope with warehouse number, storage types, storage sections, bin types, activity areas, and Warehouse Process Types. State affected MM, QM, SD, PP, middleware, delivery, handling-unit, and inventory dependencies.\n\nSection 3 Process Flow Diagram: use a text sequence or flow diagram showing each handoff between Warehouse Operator or RF Gun, EWM Warehouse Task Engine, EWM delivery or handling-unit process, ERP backend, and relevant integrations. Mark approval, validation, queue, and exception branches explicitly.\n\nSection 4 Functional Logic and Processing Algorithm: define the exact trigger such as RF scan, user event, delivery event, or background job; prerequisites, record locks, status-profile conditions, stock or inventory availability rules; and ordered IF THEN ELSE validation gates, calculations, updates, and outputs. For RF processes include an ASCII terminal mockup that identifies field length, input or display-only status, required values, validation messages, and function keys F1, F4, and F7. Explain the controlled behaviour when validation fails, including whether the warehouse task, delivery, or HU is blocked, routed to a clarification bin, or remains unchanged.\n\nSection 5 Technical Mapping and Data Dictionary: include a mapping table for every functional field with its description, SAP database table, database field, data element, data type and length, direction as Input, Output, or Evaluated, and extension point. Typical EWM tables include /SCWM/ORDIM_O for open warehouse tasks, /SCWM/HUHDR for handling-unit headers, /SCWM/LAGP for storage bins, and /SCWM/AQUA for available quantities. Identify applicable BAdIs, enhancement spots, standard function modules, and class methods; do not leave mappings ambiguous.\n\nSection 6 Exception Handling and Error Codes: document every expected business exception with message ID and message class, type Error, Warning, or Information, exact message text, trigger condition, and system recovery action. Recovery must state the controlled outcome, for example creating a clarification task, moving an HU to a clarification bin, retaining a lock, preventing confirmation, or raising an auditable support action.\n\nSection 7 Security and Authorization Requirements: define the PFCG roles that execute or display the process and each authorization object checked. Include applicable /SCWM/TO, /SCWM/RF, and B_USERST_T checks with activity values 01 Create, 02 Change, and 03 Display. State RF-device, warehouse-number, process-type, and organisational restrictions, plus the rejected behaviour and audit evidence for an unauthorised attempt.\n\nSection 8 Acceptance Criteria and HP ALM Test Cases: provide at least three complete HP ALM-ready tests. The Positive Functional Path covers valid inputs and standard execution. The Negative Boundary Gate covers an invalid entry, blocked batch, lock, or missing prerequisite and must prove a clean stop. The Authorization Security Gate attempts the process with an unauthorised role and must return an auditable rejection. Every test includes objective, prerequisites, explicit action steps, expected results, and screenshot evidence requirements. Link each test to its URS, FDS section, ServiceNow Change, and HP ALM Requirement.\n\nFor a brief EWM topic, create the full eight-section FDS without requesting clarification. Use realistic enterprise defaults while clearly marking them as assumptions: warehouse W100, relevant temperature storage types, authentic EWM tables, realistic warehouse-process types, controlled exception codes, and realistic HP ALM test evidence. Preserve regulated-system controls and make every requirement testable and traceable.""",
         "ticket_numbers": ["INC0048102", "INC0048132", "INC0048133", "INC0048136", "CHG0092100"],
-        "tags": ["sap", "ewm", "fds", "functional design specification", "functional specification", "ricefw", "abap", "gxp", "21 cfr part 11", "gamp 5", "warehouse task", "rf", "data dictionary", "scwm/ordim_o", "scwm/huhdr", "scwm/lagp", "scwm/aqua", "badi", "authorization", "pfcg", "hp alm", "acceptance criteria", "validation", "veeva"],
+        "tags": ["sap", "ewm", "fds", "functional design specification", "functional specification", "ricefw", "abap", "gxp", "21 cfr part 11", "gamp 5", "warehouse task", "rf", "data dictionary", "scwm/ordim_o", "scwm/huhdr", "scwm/lagp", "scwm/aqua", "badi", "authorization", "hp alm", "acceptance criteria", "validation", "veeva"],
     },
     {
         "id": "VEEVA-PLM-SOP-215",
@@ -540,6 +529,187 @@ CENTRAL_KNOWLEDGE_DB += (
     },
 )
 
+
+# Curated, modular operational references. These records summarize publicly
+# available SAP Help and ServiceNow product guidance in ATLAS-native language;
+# they are not copies of vendor documentation or customer-specific procedures.
+CENTRAL_KNOWLEDGE_DB += (
+    {
+        "id": "ATLAS-SAP-BASIS-OPS-001",
+        "title": "SAP Basis Operational Health, Jobs, Queues, and Transport Triage",
+        "source_type": "ATLAS Curated SAP Operations Guide",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "Modular Basis guidance for distinguishing system health, background-job, RFC/qRFC, and transport incidents before a controlled recovery.",
+        "content": "SAP Basis triage starts by separating application failure from platform failure. Record the system, client, time window, business process, user impact, and recent approved changes. For a failed background job, collect job log, spool, start condition, variant, job step, return code, and related dump before considering a restart. For queue disruption, preserve queue name, destination, LUW error, predecessor state, and RFC availability; correct the identified dependency before retrying. For transport issues, review the import log, return code, missing dependency, and target-system queue, then follow the approved change and rollback decision. Use system log and dump evidence to support escalation. A production restart, parameter change, transport reimport, or queue reset is a controlled action: it needs the applicable approval, a validation plan, and an auditable result. Validate the recovered technical component and one representative business transaction, then update the linked incident with evidence and ownership.",
+        "ticket_numbers": ["INC0048104", "INC0048109", "INC0048120", "INC0048137"],
+        "tags": ["sap", "basis", "system health", "background job", "transport", "rfc", "qrfc", "queue", "dump", "system log", "recovery", "stms", "sm37"],
+    },
+    {
+        "id": "ATLAS-SAP-SEC-OPS-001",
+        "title": "SAP Security Access-Incident Triage and Audit Evidence",
+        "source_type": "ATLAS Curated SAP Operations Guide",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "Safe access-incident workflow that preserves least privilege, separates diagnosis from remediation, and retains traceable evidence.",
+        "content": "Treat an SAP access failure as an evidence and approval workflow, not an invitation to broaden permissions. Confirm the affected user or technical identity, client, transaction or application, timestamp, business purpose, and whether the failure is reproducible. Capture the authorization-failure trace available to the authorized support team and correlate it with the request, recent access change, and identity lifecycle event. Classify the issue as missing approved access, expired or locked identity, application defect, integration identity failure, or a broader outage. Do not disclose credentials, security traces, or sensitive values in ticket comments. Route a remediation through the established identity-and-access process with approver, scope, expiry where appropriate, and segregation-of-duties review. For emergency access, use the approved, time-bounded process and retain the justification and usage review. After remediation, validate only the approved business action, capture the outcome, and record the auditor-friendly evidence in the ServiceNow work notes.",
+        "ticket_numbers": ["INC0048103", "PRB0031022"],
+        "tags": ["sap", "security", "authorization", "access incident", "least privilege", "audit evidence", "emergency access", "identity", "segregation of duties", "su53"],
+    },
+    {
+        "id": "ATLAS-SAP-PLM-OPS-001",
+        "title": "SAP PLM Change, Specification, and Product-Data Integration Control",
+        "source_type": "ATLAS Curated SAP Operations Guide",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "PLM operating guide for controlled engineering changes, specification status, document links, and downstream product-data validation.",
+        "content": "SAP PLM support begins by identifying the governed object and lifecycle state: change master, material, specification, recipe, document, BOM, or classification. Establish the current release or approval state, valid-from date, linked document version, and affected downstream process before changing data. For an integration error, retain the source object identifier, payload or message reference, mapping version, destination, and processing time. Distinguish a data-quality issue from a workflow, interface, or authorization issue. Do not bypass approval status, alter controlled master data, or reprocess a failed message until the impact and rollback path have been assessed. Validate a correction in the appropriate non-production path when change control requires it. After an approved repair, reconcile the originating PLM object, the target material or warehouse data, and the business outcome; record object versions, approver, validation result, and unresolved risk in the linked work item.",
+        "ticket_numbers": ["INC0048125", "INC0048141", "PRB0031023"],
+        "tags": ["sap", "plm", "engineering change", "specification", "recipe", "bom", "document", "classification", "material master", "integration", "validation"],
+    },
+    {
+        "id": "ATLAS-SAP-EWM-OPS-001",
+        "title": "SAP EWM Warehouse Task, Handling Unit, and Queue Operations",
+        "source_type": "ATLAS Curated SAP Operations Guide",
+        "system": "SAP S/4HANA EWM",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_CLOUD/warehouse-management",
+        "summary": "EWM operational guide for safely diagnosing warehouse-task, handling-unit, delivery, and queue issues while protecting inventory integrity.",
+        "content": "An EWM investigation must identify the warehouse number, delivery or handling unit, warehouse task, stock type, process type, bin, and physical status before any retry. Determine whether the failure is in delivery replication, task creation, RF execution, confirmation, inventory status, or a downstream queue. Preserve task status, exception code, queue state, lock owner, and relevant message before changing a task or retrying a queue. Never use a technical retry to mask a physical stock discrepancy. Where warehouse activity must continue, follow the approved business-continuity and reconciliation process. Resolve the underlying data, connectivity, or predecessor-task condition before a controlled retry. Post-recovery validation should reconcile the warehouse task, handling-unit or bin stock, delivery status, and the linked ERP posting; obtain warehouse confirmation and record any manual movement or residual risk in the incident.",
+        "ticket_numbers": ["INC0048102", "INC0048132", "INC0048136"],
+        "tags": ["sap", "ewm", "warehouse task", "handling unit", "delivery", "rf", "queue", "inventory", "goods receipt", "goods issue", "reconciliation"],
+    },
+    {
+        "id": "ATLAS-SNOW-INC-001",
+        "title": "ServiceNow Incident Handling: Restore Service with Evidence",
+        "source_type": "ATLAS Curated ServiceNow Operations Guide",
+        "system": "ServiceNow ITSM",
+        "connector": "ServiceNow",
+        "url": "https://www.servicenow.com/docs/bundle/yokohama-it-service-management/page/product/incident-management/concept/incident-management.html",
+        "summary": "Incident-management guidance for logging, triage, assignment, communications, restoration, and closure evidence.",
+        "content": "Use an Incident to restore normal service and limit business impact. Capture a concise symptom, affected service or configuration item, caller impact, start time, priority rationale, and reproducible evidence. Categorize and assign to the accountable group; update the activity stream with actions taken, findings, customer-safe status, and handoffs. Separate user-facing additional comments from internal work notes. Escalate according to the organization’s major-incident process when impact or urgency warrants coordinated command. Link related changes, problems, child incidents, and knowledge articles rather than duplicating their contents. Resolve only when service is restored and the requester-facing resolution explains the outcome or next step. Close after the required validation and closure period, retaining cause category, resolution code, and evidence needed for trend analysis.",
+        "ticket_numbers": ["INC0048102", "INC0048122", "INC0048125"],
+        "tags": ["servicenow", "incident", "incident management", "triage", "assignment group", "work notes", "additional comments", "major incident", "resolution", "closure"],
+    },
+    {
+        "id": "ATLAS-SNOW-PRB-001",
+        "title": "ServiceNow Problem Management: Root Cause, Known Error, and Prevention",
+        "source_type": "ATLAS Curated ServiceNow Operations Guide",
+        "system": "ServiceNow ITSM",
+        "connector": "ServiceNow",
+        "url": "https://www.servicenow.com/docs/bundle/yokohama-it-service-management/page/product/problem-management/concept/problem-management.html",
+        "summary": "Problem-management guide for recurring incidents, root-cause investigation, known errors, workarounds, and permanent corrective action.",
+        "content": "Use a Problem when the organization needs to identify and control the cause of one or more incidents, not merely restore a single service. Link the triggering incidents and preserve the symptom, scope, recurrence pattern, timeline, and evidence separately from hypotheses. Assign an investigation owner, record diagnostic tasks, and distinguish confirmed facts from assumptions. If the cause is not yet eliminated but a safe workaround is available, document a known error and publish or link a reviewed knowledge article so service teams can restore service consistently. A permanent fix that changes a production service belongs in the appropriate change process with risk, approval, implementation, and validation evidence. Close the Problem only after the root cause or accepted known-error outcome, related-record links, corrective-action result, and lessons for recurrence prevention are recorded.",
+        "ticket_numbers": ["PRB0031022", "PRB0031023", "PRB0030991"],
+        "tags": ["servicenow", "problem", "problem management", "root cause", "known error", "workaround", "recurring incident", "knowledge", "corrective action", "change"],
+    },
+    {
+        "id": "ATLAS-SNOW-SLA-001",
+        "title": "ServiceNow SLA Monitoring, Breach Prevention, and Escalation",
+        "source_type": "ATLAS Curated ServiceNow Operations Guide",
+        "system": "ServiceNow ITSM",
+        "connector": "ServiceNow",
+        "url": "https://www.servicenow.com/docs/bundle/yokohama-it-service-management/page/product/service-level-management/concept/service-level-management.html",
+        "summary": "Operational guidance for reading SLA state, responding to risk, and preserving valid task-SLA records.",
+        "content": "ServiceNow SLA targets are driven by the configured conditions on a task, such as service, priority, assignment, or state. Support teams should use the task-SLA state and remaining duration as operational signals, then act through the incident or request workflow rather than editing a timer record to improve reporting. At risk, confirm ownership, customer impact, next action, and any valid pause condition; update the record with an actionable plan and escalate using the service’s defined route. A paused or stopped SLA must have a legitimate workflow reason supported by the ticket state and audit trail. If an SLA is breached, retain the actual chronology, contributing condition, recovery action, and communications; do not retrospectively overwrite evidence. Periodically review breached and near-breach patterns with problem and service owners to improve categorization, staffing, knowledge, automation, or target design.",
+        "ticket_numbers": ["INC0048102", "INC0048122", "PRB0031022"],
+        "tags": ["servicenow", "sla", "task sla", "breach", "at risk", "escalation", "pause", "remaining duration", "service level management", "priority"],
+    },
+    {
+        "id": "ATLAS-SNOW-CHG-KM-001",
+        "title": "ServiceNow Change, Knowledge, and Configuration-Item Traceability",
+        "source_type": "ATLAS Curated ServiceNow Operations Guide",
+        "system": "ServiceNow ITSM",
+        "connector": "ServiceNow",
+        "url": "https://www.servicenow.com/docs/bundle/yokohama-it-service-management/page/product/change-management/concept/change-management.html",
+        "summary": "Guide for linking changes, knowledge, and configuration items to operational work without bypassing approval or evidence requirements.",
+        "content": "Use a Change to plan, authorize, implement, validate, and close a controlled production alteration. The linked incident or problem explains the service need; the Change carries scope, risk, implementation plan, rollback approach, schedule, approvals, and validation result. Associate the affected configuration items and services so impact analysis and future incident triage are traceable. Do not mark implementation complete until the agreed technical and business validation is recorded. Capture deviations, failed steps, and rollback outcomes in the change record. Convert a repeatable, reviewed resolution into a knowledge article, with audience, ownership, review date, and clear safety boundaries; link it back to the related Incident or Problem. Knowledge supports consistent restoration but never substitutes for authorization to make a production change.",
+        "ticket_numbers": ["CHG0092100", "CHG0092101", "PRB0031022"],
+        "tags": ["servicenow", "change", "change management", "knowledge", "cmdb", "configuration item", "rollback", "approval", "validation", "implementation", "risk"],
+    },
+)
+
+
+# Detailed investigation runbooks used when ATLAS is asked to analyse or
+# resolve an incident. Transaction names identify diagnostic surfaces only;
+# changes remain subject to local approval, change control, and segregation.
+CENTRAL_KNOWLEDGE_DB += (
+    {
+        "id": "ATLAS-RUNBOOK-BASIS-001",
+        "title": "SAP Basis End-to-End Incident Investigation and Controlled Recovery",
+        "source_type": "ATLAS Detailed SAP Runbook",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "Transaction-led Basis workflow for job, dump, RFC/qRFC, gateway, lock, transport, and system-health incidents.",
+        "content": "Scope: use this runbook when an SAP job, interface, RF gateway, transport, or general technical service is failing. Step 1—frame the incident: record system/SID, client, hostname or node, business process, first-failure time, affected users, linked ServiceNow record, and recent approved changes. Step 2—check platform evidence: use SM21 for system-log events around the time window; use ST22 for ABAP dumps and retain the runtime error, program, user, client, and timestamp; use SM50 or SM66 only to observe work-process pressure and long-running work, not to terminate work without ownership and approval. Step 3—check scheduled processing: in SM37 filter by job name, user, status, and time; capture job log, spool, variant, step program, return code, and predecessor/dependency. A cancelled job with a dump routes to the application owner after ST22 evidence; a cancelled job with RFC or authorization evidence routes to the relevant technical owner. Step 4—check interfaces and queues: use SMQ1 for outbound qRFC and SMQ2 for inbound qRFC; retain queue name, destination, LUW, status, predecessor, error text, and retry history. Use SM58 for failed tRFC units and SM59 in display/test mode to verify destination reachability. Use WE02 or WE05 to inspect IDoc status and segment-level error context when an IDoc is involved. Step 5—check locks and connectivity: use SM12 to identify lock object, owner, client, age, and related transaction; a lock is evidence, not permission to delete it. For gateway or RFC symptoms, review SMGW and SMICM traces/status with the Basis and network owner; determine whether impact is device-specific, node-specific, or broad. Step 6—check transports: in STMS import overview and import logs, capture request, target, return code, failed object, queue sequence, and prior import status. A return code or activation failure requires diagnosis and approved correction; do not repeatedly reimport. Decision rule: correct the underlying cause first; then use the approved recovery path for a job restart, queue activation, destination correction, or transport remediation. Production restarts, parameter changes, import retries, lock deletion, and queue resets require the applicable approval and rollback plan. Step 7—validate: prove one representative business transaction, job completion, queue drain, interface delivery, or RF action; check for recurring SM21/ST22 evidence; obtain business confirmation; record exact action, approver, timestamps, validation result, and residual risk in ServiceNow.",
+        "ticket_numbers": ["INC0048104", "INC0048109", "INC0048120", "INC0048130", "INC0048137"],
+        "tags": ["sap", "basis", "runbook", "sm21", "st22", "sm37", "sm50", "sm66", "smq1", "smq2", "sm58", "sm59", "we02", "we05", "sm12", "smgw", "smicm", "stms", "incident resolution", "transport", "queue"],
+    },
+    {
+        "id": "ATLAS-RUNBOOK-SEC-001",
+        "title": "SAP Security Access Incident Diagnosis, Approval, and Validation",
+        "source_type": "ATLAS Detailed SAP Runbook",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "Least-privilege access-incident workflow using read-only diagnostics, identity evidence, approved remediation, and auditable validation.",
+        "content": "Scope: use this runbook for access denied, missing menu/action, technical-user, expired-access, or suspected authorization incidents. Step 1—identify the exact failed action: collect user or technical identity, system/client, transaction or Fiori application, business object, timestamp, error message, business impact, and whether the action ever worked. Never place passwords, tokens, full security traces, or sensitive personal data in a ticket. Step 2—confirm identity state through the approved identity administration process: check that the user is active, assigned to the correct business population, not locked or expired, and using the expected client. Step 3—collect diagnostic evidence: an authorized analyst may use SU53 immediately after the failure to capture the most recent authorization check; correlate it with the user, timestamp, and attempted action. Use SUIM in display/reporting mode to compare approved access patterns and identify whether the issue is isolated or affects a population. Use ST01 only when the security owner approves a time-bounded trace, then stop the trace promptly and protect its output as sensitive evidence. Step 4—differentiate the cause: missing approved access; expired/locked identity; organizational restriction such as company, plant, or warehouse; application defect; integration technical identity; or a broad service outage. Step 5—decide remediation: route normal access through the approved request and manager/application-owner approval flow; use emergency access only through the organization’s controlled, time-bounded process with justification and post-use review. Do not expand access to diagnose an unrelated error and do not remove segregation controls as a workaround. Step 6—validate: test only the approved business action with the requester or delegated tester, confirm that unauthorized functions remain unavailable, and retain the approval reference, effective scope, evidence, and validation outcome. Step 7—close or escalate: document the confirmed cause and safe resolution in work notes; link a Problem if failures recur or an application defect is suspected; link a Change if a production configuration correction is needed.",
+        "ticket_numbers": ["INC0048103", "INC0048104", "PRB0031022"],
+        "tags": ["sap", "security", "runbook", "su53", "suim", "st01", "access denied", "identity", "technical user", "least privilege", "emergency access", "segregation", "audit evidence", "incident resolution"],
+    },
+    {
+        "id": "ATLAS-RUNBOOK-PLM-001",
+        "title": "SAP PLM Change, Specification, Document, and Integration Incident Runbook",
+        "source_type": "ATLAS Detailed SAP Runbook",
+        "system": "SAP S/4HANA",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_ON-PREMISE",
+        "summary": "End-to-end diagnostic sequence for PLM engineering changes, specifications, documents, BOMs, and replication failures.",
+        "content": "Scope: use this runbook for PLM approval, specification, recipe, document, engineering-change, BOM, or material-data incidents. Step 1—establish the governed object: capture change number, material, specification, recipe, document-info record, BOM, plant, validity date, and business consequence. Step 2—inspect lifecycle and version evidence: use CC03 to display the engineering change master and its status/valid-from date; use CV03N to display the document-info record and version/status; use CS03 to display the BOM and effective change context; use MM03 to read the downstream material data that is expected to change. When a specification is involved, use the organization’s authorized PLM/EHS display transaction, commonly CG03, to inspect status, identifiers, and links. Do not change a released object while diagnosing it. Step 3—inspect workflow and application logs: use SLG1 with the relevant object/subobject and time window; retain application-log messages, object keys, user, and timestamp. For background processing, use SM37 to identify jobs and job logs. For asynchronous integration, inspect WE02 or WE05 for IDoc status and payload context, then SMQ1/SMQ2 or SM58 if queue/RFC processing is implicated. Step 4—determine the failure class: invalid lifecycle status or validity date; missing predecessor approval; inconsistent master data; document/BOM linkage; mapping or interface failure; lock contention; or a downstream material update failure. Use SM12 only to identify a lock owner and age; resolve ownership before any controlled removal. Step 5—plan remediation: workflow or master-data corrections require the correct business/data owner; mapping, integration, and production configuration changes require approved change control and a rollback path. Step 6—validate end to end: confirm the originating object’s status and version, the linked document/BOM/specification, the target material or warehouse data, the integration message result, and the business user’s expected display or process. Record the object keys, evidence, approvals, test result, and residual impact in ServiceNow; create or update a Problem for recurring data/interface patterns.",
+        "ticket_numbers": ["INC0048125", "INC0048141", "INC0048142", "PRB0031023", "CHG0092101"],
+        "tags": ["sap", "plm", "runbook", "cc03", "cv03n", "cs03", "mm03", "cg03", "slg1", "sm37", "we02", "we05", "smq1", "smq2", "sm58", "sm12", "engineering change", "specification", "document", "bom", "integration"],
+    },
+    {
+        "id": "ATLAS-RUNBOOK-EWM-001",
+        "title": "SAP EWM Delivery, Warehouse Task, RF, Stock, and Queue Incident Runbook",
+        "source_type": "ATLAS Detailed SAP Runbook",
+        "system": "SAP S/4HANA EWM",
+        "connector": "Google Drive",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_CLOUD/warehouse-management",
+        "summary": "Transaction-led EWM workflow for determining whether a failure is delivery, task, RF, stock, lock, or queue related and validating a safe recovery.",
+        "content": "Scope: use this runbook for inbound/outbound delivery, warehouse task, handling unit, RF, staging, stock, or qRFC incidents. Step 1—set the physical and system scope: capture warehouse number, delivery number, handling-unit number, warehouse task, material/batch, bin, stock type, process type, user/device, and exact time. Confirm whether physical movement already happened; never use a system retry to conceal an unrecorded movement. Step 2—inspect EWM business objects: use /SCWM/MON to review warehouse tasks, stock, delivery, queues, and exception context; use /SCWM/PRDI to display inbound-delivery processing; use /SCWM/TO_CONF in display or controlled-confirmation context to examine warehouse-task status; use /SCWM/ADHU to display handling-unit data; use /SCWM/RFUI only with the operational user/process owner to reproduce a permitted RF path. Capture task status, exception code, predecessor/dependent task, delivery status, and stock/bin evidence. Step 3—inspect replication and technical flow: use SMQ1/SMQ2 for qRFC queue name, destination, LUW, error, and predecessor; use SM58 for failed tRFC; use WE02/WE05 for IDoc status where applicable; use SM12 to identify lock object, owner, client, and age. For a broad RF issue, engage Basis/network owners to check gateway and connectivity evidence rather than restarting individual devices blindly. Step 4—classify the incident: delivery did not replicate; task could not be created; task is blocked by stock/status/predecessor; RF input/session is failing; physical and book stock disagree; or an integration queue is stopped. Step 5—remediate only after the cause is clear: correct master data, resolve the approved predecessor issue, restore connectivity, or use the approved queue/task recovery procedure. Lock deletion, queue reset/activation, stock adjustment, and task confirmation in production require owner confirmation and the applicable approval. Step 6—validate: recheck the queue and task status, reconcile handling-unit/bin stock with the delivery and ERP posting, perform one representative permitted scan or confirmation, obtain warehouse-supervisor confirmation, and document manual-contingency movements, validation evidence, and remaining risk in ServiceNow.",
+        "ticket_numbers": ["INC0048102", "INC0048109", "INC0048132", "INC0048133", "INC0048136"],
+        "tags": ["sap", "ewm", "runbook", "scwm/mon", "scwm/prdi", "scwm/to_conf", "scwm/adhu", "scwm/rfui", "warehouse task", "handling unit", "delivery", "stock", "smq1", "smq2", "sm58", "we02", "we05", "sm12", "rf", "queue", "incident resolution"],
+    },
+    {
+        "id": "ATLAS-RUNBOOK-SNOW-ITSM-001",
+        "title": "ServiceNow End-to-End Incident, SLA, Problem, Change, and Knowledge Workflow",
+        "source_type": "ATLAS Detailed ServiceNow Runbook",
+        "system": "ServiceNow ITSM",
+        "connector": "ServiceNow",
+        "url": "https://www.servicenow.com/docs/bundle/yokohama-it-service-management/page/product/incident-management/concept/incident-management.html",
+        "summary": "Operational workflow for using ServiceNow records and related lists to analyse, coordinate, resolve, escalate, and prevent incidents.",
+        "content": "Scope: use this runbook to manage the ITSM record around a technical investigation. Step 1—open the Incident and establish a trustworthy timeline: confirm caller/requested-for, affected business service and configuration item, impact, urgency, priority, assignment group, assignee, state, hold reason, start time, and linked records. Review Additional comments for customer-facing commitments and Work notes for internal evidence; do not copy secrets, raw tokens, or sensitive traces into either field. Step 2—read operational controls: inspect the Task SLAs related list for stage, remaining duration, breach state, pause condition, and escalation history. Treat the SLA as a signal—update the incident plan and escalate ownership rather than editing a timer. Review child incidents, parent/major-incident links, related changes, related problems, attachments, and knowledge links to prevent duplicate investigation. Step 3—triage and communicate: set category/subcategory and assignment from the confirmed symptom; record the current hypothesis, exact next action, owner, and expected update time in work notes; use additional comments for customer-safe status. Escalate a broad or high-impact outage through the major-incident process. Step 4—resolve or coordinate: for a repeatable workaround, link the approved knowledge article; for a recurring or unknown underlying cause, create/link a Problem and record evidence, not conclusions; for a production change, create/link a Change with scope, risk, approvals, implementation, rollback, and validation. Step 5—manage the Problem: in the Problem record, associate incidents, create investigation tasks, document confirmed root cause or known error, and link the permanent-fix Change. Step 6—close safely: confirm service restoration with evidence and the requester/business owner, set resolution information, retain relevant attachments and work notes, and close only after required validation. Review breached or near-breach records for systemic causes, then improve routing, knowledge, automation, staffing, or service targets through the governed process.",
+        "ticket_numbers": ["INC0048102", "INC0048122", "PRB0031022", "CHG0092100"],
+        "tags": ["servicenow", "runbook", "incident", "problem", "change", "task sla", "major incident", "work notes", "additional comments", "related list", "configuration item", "knowledge", "resolution", "root cause", "sla breach", "incident resolution"],
+    },
+)
+
+# Keep the retained EWM authoring standard free of the removed legacy
+# authorization material while preserving its generic security requirement.
+CENTRAL_KNOWLEDGE_DB = tuple(
+    {
+        **record,
+        "content": record["content"].replace("PFCG roles", "approved business roles"),
+    }
+    if record["id"] == "VEEVA-FDS-EWM-001" else record
+    for record in CENTRAL_KNOWLEDGE_DB
+)
+
 class CentralTicketRepository:
     """The sole runtime record store for API, topology, and RAG reads.
 
@@ -610,7 +780,13 @@ def central_knowledge_records() -> list[CentralKnowledgeRecord]:
 
 
 def central_knowledge_references(ticket_number: str, title: str) -> list[dict[str, str]]:
-    """Return canonical citation cards for an incident or work item."""
+    """Return canonical citation cards for an incident or work item.
+
+    qRFC and RFC references are prioritized from the ticket's supplied context
+    so every relevant drawer exposes the approved operational material first.
+    Access remains in the source platforms; credentials are never stored in
+    the application or sent to the browser.
+    """
 
     words = {word.lower() for word in title.replace("/", " ").replace("-", " ").split() if len(word) > 2}
     exact = [record for record in CENTRAL_KNOWLEDGE_DB if ticket_number in record["ticket_numbers"]]
@@ -618,8 +794,41 @@ def central_knowledge_references(ticket_number: str, title: str) -> list[dict[st
         record for record in CENTRAL_KNOWLEDGE_DB
         if record not in exact and words.intersection(record["tags"])
     ]
-    selected = (exact + related)[:4]
-    return [
+    selected = exact + related
+    context = title.casefold()
+    has_qrfc = bool(re.search(r"\bq[ -]?rfc\b", context))
+    has_rfc = bool(re.search(r"\brfc\b", context))
+    priority_references: list[dict[str, str]] = []
+    vault_access_note = "Requires approved Veeva Vault access; authenticate through the normal Roche sign-in flow."
+
+    if has_qrfc:
+        priority_references.extend([
+            {
+                "source_type": "Veeva Vault SOP",
+                "title": "Veeva Vault Document 9861385 (v2.0) — qRFC monitoring",
+                "path_or_url": "https://roche-quality-pharma.veevavault.com/ui/#doc_info/790123/2/0=&idx=14&pt=al&sm=&tvsl=Jml2cj0wJnNlYXJjaD0lMjU3QiUyNTIydGV4dCUyNTIyJTI1M0ElMjUyMnFyZmMlMjUyMG1vbml0b3JpbmclMjUyMiUyNTdEJmZyc2MxPWZhbHNlJml2PTEmYXJjaD1mYWxzZSZ2aWV3SWQ9YWR2U2VhcmNoJnRhYklkPTBUQjAwMDAwMDAwMDEwMiZmYWNldHNVbmNoYW5nZWQ9dHJ1ZSZpdnM9Jml2bz1kZXNj",
+                "summary": "Approved qRFC monitoring reference; document number 9861385, version 2.0.",
+                "access_note": vault_access_note,
+            },
+            {
+                "source_type": "Veeva Vault SOP",
+                "title": "Veeva Vault Document 3442398 (v2.0) — qRFC reference",
+                "path_or_url": "https://roche-quality-pharma.veevavault.com/ui/#doc_info/790142/2/0=&idx=4&pt=al&sm=&tvsl=Jml2cj0wJnNlYXJjaD0lMjU3QiUyNTIydGV4dCUyNTIyJTI1M0ElMjUyMkVXTSUyNTIwcXJmYyUyNTIwbW9uaXRvcmluZyUyNTIyJTI1N0QmZnJzYzE9ZmFsc2UmaXY9MSZhcmNoPWZhbHNlJnZpZXdJZD1hZHZTZWFyY2gmdGFiSWQ9MFRCMDAwMDAwMDAwMTAyJmZhY2V0c1VuY2hhbmdlZD10cnVlJml2cz0maXZzPSZpdm89ZGVzYw",
+                "summary": "Approved qRFC reference; document number 3442398, version 2.0.",
+                "access_note": vault_access_note,
+            },
+        ])
+
+    if has_qrfc or has_rfc:
+        priority_references.append({
+            "source_type": "Confluence",
+            "title": "Confluence — SMQ1 Outbound Event Queues (WMBB, WMDB, WMOB, WMTB)",
+            "path_or_url": "https://rochewiki.roche.com/confluence/spaces/eWMCoE/pages/544251764/SMQ1+-+Outbound+event+queues+WMBB+WMDB+WMOB+WMTB",
+            "summary": "Operational reference for outbound RFC/qRFC queue monitoring and diagnosis in SMQ1.",
+            "access_note": "Requires approved Roche Confluence access; authenticate through the normal Roche sign-in flow.",
+        })
+
+    canonical_references = [
         {
             "source_type": record["source_type"],
             "title": f"{record['id']} — {record['title']}",
@@ -628,6 +837,7 @@ def central_knowledge_references(ticket_number: str, title: str) -> list[dict[st
         }
         for record in deepcopy(selected)
     ]
+    return (priority_references + canonical_references)[:4]
 
 
 def central_knowledge_summary() -> dict[str, object]:
