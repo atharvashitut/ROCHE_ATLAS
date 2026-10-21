@@ -51,7 +51,7 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
   python3 -m venv "${ROOT_DIR}/.venv"
 fi
 
-if ! "${PYTHON_BIN}" -c 'import chromadb, fastapi, httpx' >/dev/null 2>&1; then
+if ! "${PYTHON_BIN}" -c 'import chromadb, duckduckgo_search, fastapi, httpx' >/dev/null 2>&1; then
   echo "Installing backend dependencies..."
   "${ROOT_DIR}/.venv/bin/pip" install -r "${ROOT_DIR}/backend/requirements.txt"
 fi

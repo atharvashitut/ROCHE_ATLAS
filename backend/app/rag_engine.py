@@ -26,6 +26,7 @@ from .central_db import central_knowledge_records, central_ticket_by_reference, 
 from .connectors import connector_documents, connector_statuses
 from .ollama_client import OLLAMA_GENERATOR, OllamaStreamError
 from .vector_store import RetrievedDocument, RetrievalDocument, VECTOR_STORE, serialize_retrieved
+from .web_search import WEB_SEARCH
 
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -324,13 +325,15 @@ def _procedural_markdown_context(chunks: list[dict[str, object]], *, max_charact
     sections: list[str] = []
     remaining = max_characters
     for chunk in chunks:
-        if chunk.get("record_type") != "knowledge" or remaining <= 0:
+        if chunk.get("record_type") not in {"knowledge", "web_knowledge"} or remaining <= 0:
             continue
         title = str(chunk.get("title") or "Enterprise procedure").strip()
         content = re.sub(r"\s+", " ", str(chunk.get("content") or "")).strip()
         if not content:
             continue
-        heading = f"### {title}\n"
+        source_url = str(chunk.get("url") or "").strip()
+        origin = "Web source" if chunk.get("record_type") == "web_knowledge" else "Enterprise source"
+        heading = f"### {title} ({origin}{f': {source_url}' if source_url else ''})\n"
         available = max(0, remaining - len(heading))
         if available <= 0:
             break
@@ -372,7 +375,7 @@ def _local_generation_prompt(
     ) if chunks or operational_context or fds_standard_context else _fallback_prompt(query_text)
 
 
-def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False, fds_mode: bool = False) -> str:
+def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False, fds_mode: bool = False, web_research: bool = False) -> str:
     """Shared system envelope for Gemini and local Ollama synthesis."""
 
     metric_instruction = (
@@ -399,13 +402,19 @@ def _synthesis_system_prompt(*, metric_mode: bool, concise: bool = False, fds_mo
         "This applies to any requested SAP domain; do not limit the design to EWM unless the user's topic is EWM."
         if fds_mode else ""
     )
+    web_instruction = (
+        " When using a supplied Web source, identify its title and URL next to the factual claim it supports. "
+        "Treat web information as supplementary and never replace live ticket or calculated ATLAS data with it."
+        if web_research else ""
+    )
     return (
         "You are ATLAS, a senior SAP and GxP operations copilot. Use supplied live data and enterprise evidence as factual grounding. "
         "Start immediately with the requested facts, answer, or procedure. Do not use polite preambles, meta-introductions, or phrases such as 'here is', 'I can help', or 'based on the context'. "
         "Answer the user's actual request in the style, tone, language, length, and format they ask for; you may summarize, explain, write creatively, or use bullets when useful. "
         "Do not invent operational facts or numeric values not supported by the context. When context is incomplete, say what is uncertain. "
+        "Keep a standard SAP business process separate from an incident-recovery runbook: do not introduce queues, locks, diagnostics, or recovery actions unless the question or retrieved evidence explicitly describes a failure. "
         "You may cite a relevant supplied document link naturally when it improves the answer, but do not force citations or a fixed response template."
-        f"{metric_instruction}{concise_instruction}{fds_instruction}"
+        f"{metric_instruction}{concise_instruction}{fds_instruction}{web_instruction}"
     )
 
 
@@ -1203,6 +1212,26 @@ def _is_broad_goods_receipt_overview(query_text: str) -> bool:
     ) and not _has_specific_troubleshooting_signal(query_text)
 
 
+def _is_goods_issue_question(query_text: str) -> bool:
+    """Recognise the standard outbound/PGI process separately from recovery work."""
+
+    query = query_text.casefold()
+    return bool(
+        re.search(r"\b(?:post\s+)?goods?\s+issue\b", query)
+        or re.search(r"\bpgi\b", query)
+        or any(term in query for term in ("/scwm/prdo", "outbound delivery order", "warehouse order", "outbound delivery"))
+    )
+
+
+def _is_broad_goods_issue_overview(query_text: str) -> bool:
+    """Select the standard EWM business flow only when no failure is described."""
+
+    query = query_text.casefold()
+    return _is_goods_issue_question(query_text) and bool(
+        re.search(r"\b(?:explain|overview|process|workflow|walk\s+me\s+through|describe|what\s+is|how\s+does)\b", query)
+    ) and not _has_specific_troubleshooting_signal(query_text)
+
+
 def _has_specific_troubleshooting_signal(query_text: str) -> bool:
     """Identify a request that must be answered from retrieved runbook evidence.
 
@@ -1241,6 +1270,8 @@ def _procedure_title(query_text: str, chunks: list[dict[str, object]]) -> str:
 
     if _is_broad_goods_receipt_overview(query_text):
         return "LEAP SAP EWM Goods Receipt"
+    if _is_broad_goods_issue_overview(query_text):
+        return "SAP EWM Standard Goods Issue"
     if _is_integration_change_question(query_text):
         return "Production SAP Interface Change Control"
     if _is_servicenow_change_management_question(query_text):
@@ -1297,6 +1328,16 @@ def _topic_action_items(query_text: str) -> list[str] | None:
     # an operational CHG list route.
     if _is_servicenow_change_management_question(query_text):
         return None
+    if _is_broad_goods_issue_overview(query_text):
+        return [
+            "Create the sales order and outbound delivery in ERP or SAP S/4HANA.",
+            "Distribute the outbound delivery to EWM, where it becomes the Outbound Delivery Order (ODO) for warehouse execution.",
+            "Group eligible deliveries into waves by route, shipping time, or operational criteria, then release the wave to create warehouse tasks (WTs) and warehouse orders (WOs).",
+            "Pick the stock from the assigned source bins using RF or Fiori and confirm the warehouse tasks.",
+            "Pack and consolidate the picked stock at the packing work center, creating or updating the handling units (HUs).",
+            "Move packed HUs to the goods-issue staging area and load them onto the transportation unit or delivery vehicle.",
+            "Post goods issue for the outbound delivery in EWM, typically in /SCWM/PRDO where enabled by the process design. This updates EWM stock and delivery status, sends the goods-movement update to ERP, and enables follow-on billing.",
+        ]
     if _is_integration_change_question(query_text):
         return [
             "Confirm the affected interface, source and target systems, business impact, approved Change Request, implementation owner, and rollback owner.",
@@ -1746,10 +1787,32 @@ def _operational_ticket_context(
     return _ticket_queue_summary(tickets, label=label)
 
 
+def _web_research_fallback(chunks: list[dict[str, object]]) -> str:
+    """Present cited search snippets when local generation is unavailable."""
+
+    web_chunks = [chunk for chunk in chunks if chunk.get("record_type") == "web_knowledge"]
+    if not web_chunks:
+        return ""
+    lines = ["Web research results", ""]
+    for index, chunk in enumerate(web_chunks[:5], start=1):
+        title = str(chunk.get("title") or "DuckDuckGo result")
+        url = str(chunk.get("url") or "")
+        snippet = " ".join(str(chunk.get("content") or "").split())
+        lines.append(f"{index}. {title}")
+        if snippet:
+            lines.append(f"   {snippet}")
+        if url:
+            lines.append(f"   Source: {url}")
+    return "\n".join(lines)
+
+
 def _deterministic_failure_response(query_text: str, chunks: list[dict[str, object]], operational_context: str) -> str:
     """Last-resort response; callers use this only after generation fails."""
 
     base = _local_answer(query_text, chunks)
+    web_results = _web_research_fallback(chunks)
+    if web_results:
+        return f"{web_results}\n\n{base}"
     if operational_context:
         return f"The generation service is temporarily unavailable. Retrieved operational context:\n\n{operational_context}\n\n{base}"
     return base
@@ -1785,7 +1848,7 @@ def _generation_token_budget(query_text: str) -> int:
     return brief_budget if _is_brief_operational_lookup(query_text) else full_budget
 
 
-def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+async def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """Prepare one read-only RAG execution plan for JSON or SSE delivery."""
 
     dashboard_filters = _dashboard_query_filters(query_text)
@@ -1795,16 +1858,34 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
     sla_scoped_ticket_list_requested = _is_sla_scoped_ticket_list_request(query_text)
     metrics_requested = _is_metrics_intent(query_text) and not sla_scoped_ticket_list_requested
     fds_requested = _is_fds_generation_request(query_text)
+    standard_goods_issue_requested = _is_broad_goods_issue_overview(query_text)
     # Metrics are already fully grounded in the canonical Stats aggregation;
     # three retrieval chunks are enough for an optional natural-language
     # explanation, while procedural requests retain deeper evidence.
     retrieval_limit = 3 if metrics_requested else 8 if fds_requested else 5 if _is_knowledge_procedure_request(query_text) else 4
-    chunks = retrieve_vector_context(query_text, limit=retrieval_limit)
+    if standard_goods_issue_requested:
+        # A normal business-process question must not inherit qRFC or outage
+        # records merely because they share the words "EWM" and "goods
+        # issue". Select the curated standard directly and bypass approximate
+        # vector ranking for this unambiguous process intent.
+        standard_documents = [
+            document for document in build_retrieval_documents()
+            if document.id.startswith("source:ATLAS-SAP-EWM-PROC-001:")
+        ]
+        chunks = [serialize_retrieved(RetrievedDocument(document, 1.0)) for document in standard_documents[:1]]
+    else:
+        chunks = retrieve_vector_context(query_text, limit=retrieval_limit)
     direct_ticket_ids = _explicit_ticket_numbers(query_text)
     direct_tickets = [
         ticket for ticket_id in direct_ticket_ids
         if (ticket := central_ticket_records().get(ticket_id)) is not None
     ]
+    web_research = {"chunks": [], "status": "not_requested", "warning": None}
+    # Exact ticket, KPI, and scoped operational-queue responses use canonical
+    # backend data only and are never sent to an external web provider.
+    if not direct_tickets and not metrics_requested and not sla_scoped_ticket_list_requested and not standard_goods_issue_requested:
+        web_research = await WEB_SEARCH.search(query_text)
+        chunks.extend(list(web_research["chunks"]))
     assignees = _mentioned_assignees(query_text)
     groups = _mentioned_assignment_groups(query_text)
     modules = _requested_sap_modules(query_text)
@@ -1834,6 +1915,13 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         # decide whether an operator needs the next safe resolution action.
         canonical_answer = "\n\n---\n\n".join(_ticket_answer(ticket) for ticket in direct_tickets)
         canonical_answer_model = "canonical-ticket-resolution-plan"
+    elif standard_goods_issue_requested:
+        canonical_answer = _format_procedure_answer(
+            query_text,
+            _topic_action_items(query_text) or [],
+            chunks,
+        )
+        canonical_answer_model = "canonical-sap-ewm-goods-issue-process"
     if metrics_requested:
         live_stats = _live_stats_snapshot(query_text, active_only=True)
         stats_context = _stats_context_block(live_stats)
@@ -1878,8 +1966,9 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         if ticket.number not in ticket_ids:
             ticket_ids.append(ticket.number)
 
-    intent = "functional_design_generation" if fds_requested else "direct_ticket" if direct_tickets else "live_ticket_context" if scoped_tickets else "live_stats_context" if metrics_requested else "vector_grounded_rag"
+    intent = "functional_design_generation" if fds_requested else "direct_ticket" if direct_tickets else "standard_sap_process" if standard_goods_issue_requested else "live_ticket_context" if scoped_tickets else "live_stats_context" if metrics_requested else "vector_grounded_rag"
     generation_max_tokens = _generation_token_budget(query_text)
+    has_web_research = bool(web_research["chunks"])
     return {
         "query_text": query_text,
         "chunks": chunks,
@@ -1888,6 +1977,7 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
             metric_mode=metrics_requested,
             concise=generation_max_tokens <= 350,
             fds_mode=fds_requested,
+            web_research=has_web_research,
         ),
         "max_tokens": generation_max_tokens,
         "operational_context": operational_context,
@@ -1902,7 +1992,12 @@ def prepare_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = N
         "fds_standard_context": fds_context,
         "sources": _sources(chunks),
         "retrieval": [{key: value for key, value in chunk.items() if key != "content"} for chunk in chunks],
-        "retrieval_route": "vector_plus_live_context" if operational_context else "vector_grounded_rag" if chunks else "general_reasoning",
+        "web_research": {
+            "status": web_research["status"],
+            "warning": web_research["warning"],
+            "source_count": len(web_research["chunks"]),
+        },
+        "retrieval_route": "canonical_knowledge_process" if standard_goods_issue_requested else "vector_plus_web_research" if has_web_research else "vector_plus_live_context" if operational_context else "vector_grounded_rag" if chunks else "general_reasoning",
     }
 
 
@@ -1920,6 +2015,7 @@ def hybrid_rag_metadata(plan: dict[str, Any]) -> dict[str, Any]:
         "listed_ticket_ids": plan["listed_ticket_ids"],
         "stats_context": plan["stats_context"],
         "chart_data": plan["chart_data"],
+        "web_research": plan["web_research"],
     }
 
 
@@ -1965,7 +2061,7 @@ async def stream_hybrid_rag(plan: dict[str, Any]):
 async def query_hybrid_rag(query_text: str, history: list[dict[str, str]] | None = None) -> dict[str, Any]:
     """Ground every query, then send every healthy request to Ollama."""
 
-    plan = prepare_hybrid_rag(query_text, history)
+    plan = await prepare_hybrid_rag(query_text, history)
     if plan.get("canonical_answer"):
         return {
             "answer": str(plan["canonical_answer"]),
@@ -2035,6 +2131,7 @@ def rag_status() -> dict[str, object]:
             "gemini_model": GENERATION_MODEL,
             "fallback": "deterministic-grounded-synthesis",
         },
+        "web_research": WEB_SEARCH.status(),
     }
 
 

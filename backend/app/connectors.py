@@ -61,6 +61,7 @@ CONNECTORS: tuple[EnterpriseConnector, ...] = (
     CanonicalMockConnector("Veeva Vault", "Veeva Vault QMS", ("VEEVA_VAULT_URL", "VEEVA_CLIENT_ID", "VEEVA_CLIENT_SECRET")),
     CanonicalMockConnector("HP ALM", "HP ALM Quality Center", ("HP_ALM_BASE_URL", "HP_ALM_CLIENT_ID", "HP_ALM_CLIENT_SECRET")),
     CanonicalMockConnector("Google Drive", "Google Drive KT Hub", ("GOOGLE_DRIVE_FOLDER_ID", "GOOGLE_APPLICATION_CREDENTIALS")),
+    CanonicalMockConnector("SAP Help", "SAP Help Portal"),
 )
 
 

@@ -77,6 +77,13 @@ function InlineStatsVisual({ chartData }) {
   </section>
 }
 
+function WebResearchSources({ metadata }) {
+  const sources = Array.isArray(metadata?.sources) ? metadata.sources : []
+  const webSources = sources.filter((source) => source?.source_type === 'DuckDuckGo Web' && source?.url)
+  if (!webSources.length) return null
+  return <section className="mt-4 border-t border-slate-700/80 pt-3" aria-label="Web research sources"><p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-sky-300">Web research sources</p><ul className="mt-2 space-y-1.5">{webSources.map((source, index) => <li key={`${source.id || index}-${source.url}`} className="text-xs leading-5"><a href={source.url} target="_blank" rel="noreferrer" className="text-cyan-300 underline underline-offset-2 hover:text-cyan-200">{source.title || source.url} ↗</a></li>)}</ul></section>
+}
+
 export default function Chat() {
   const [messages, setMessages] = useState([{ role: 'assistant', text: 'I am ATLAS Co-Pilot. Ask about the current ITSM workload, SLA health, or operational guidance.' }])
   const [message, setMessage] = useState('')
@@ -188,7 +195,7 @@ export default function Chat() {
   return <section className="mx-auto flex h-[calc(100vh-5rem)] min-h-[680px] max-w-7xl flex-col px-4 py-8 sm:px-6">
     <div><p className="text-sm font-semibold uppercase tracking-[0.2em] text-teal-300">Conversational operations</p><h1 className="mt-2 text-3xl font-bold">ATLAS Co-Pilot</h1><p className="mt-2 text-slate-400">Turn the current incident context into clear operational next steps.</p></div>
     <div className="mt-6 flex flex-wrap gap-3">{quickActions.map((item) => <button key={item.label} type="button" disabled={sending} onClick={() => prefillPrompt(item.prompt)} className="rounded-lg border border-teal-400/50 bg-teal-500/10 px-4 py-2 text-sm font-semibold text-teal-100 hover:bg-teal-500/20 disabled:opacity-50">{item.label}</button>)}</div>
-    <div ref={transcriptRef} onScroll={handleTranscriptScroll} className="custom-scrollbar mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/70 p-6 pr-4" aria-live="polite">{messages.map((item, index) => <div key={item.id || `${item.role}-${index}`} className={`max-w-5xl rounded-xl px-5 py-4 text-sm leading-6 ${item.role === 'user' ? 'ml-auto bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}`}><MessageText text={item.text} />{item.streaming && !item.text && <p className="mt-2 text-xs text-slate-400">{item.streamStatus || 'ATLAS is grounding the request…'}</p>}{item.role === 'assistant' && <InlineStatsVisual chartData={item.chartData} />}</div>)}{sending && <p className="text-sm text-slate-400">ATLAS is drafting a response…</p>}</div>
+    <div ref={transcriptRef} onScroll={handleTranscriptScroll} className="custom-scrollbar mt-6 min-h-0 flex-1 space-y-4 overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900/70 p-6 pr-4" aria-live="polite">{messages.map((item, index) => <div key={item.id || `${item.role}-${index}`} className={`max-w-5xl rounded-xl px-5 py-4 text-sm leading-6 ${item.role === 'user' ? 'ml-auto bg-cyan-500 text-slate-950' : 'bg-slate-800 text-slate-200'}`}><MessageText text={item.text} />{item.streaming && !item.text && <p className="mt-2 text-xs text-slate-400">{item.streamStatus || 'ATLAS is grounding the request…'}</p>}{item.role === 'assistant' && <InlineStatsVisual chartData={item.chartData} />}{item.role === 'assistant' && <WebResearchSources metadata={item.metadata} />}</div>)}{sending && <p className="text-sm text-slate-400">ATLAS is drafting a response…</p>}</div>
     {error && <p className="mt-3 text-sm text-rose-300" role="alert">Unable to query co-pilot: {error}</p>}
     <form onSubmit={submit} className="mt-5 flex items-end gap-3"><textarea ref={composerRef} rows="2" value={message} onKeyDown={handleComposerKeyDown} onChange={(event) => setMessage(event.target.value)} placeholder="Ask a question about the ITSM queue…" className="min-h-[3.25rem] min-w-0 flex-1 resize-y rounded-xl border border-slate-500 bg-slate-950 px-4 py-3 text-slate-100 caret-cyan-300 outline-none placeholder:text-slate-400 focus:border-teal-400 focus:bg-slate-900" /><button disabled={sending} className="monday-primary rounded-xl px-5 py-3 font-semibold disabled:opacity-60">Send</button></form>
   </section>

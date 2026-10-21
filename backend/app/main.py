@@ -120,36 +120,54 @@ def ticket_payload(ticket: Ticket, include_agent_analysis: bool = False) -> dict
 
 
 def calculate_customer_sentiment(ticket: Ticket) -> dict[str, object]:
-    """Score only caller/requested-for comments, excluding support journal entries."""
+    """Return the authoritative ticket sentiment with caller-comment evidence.
+
+    ``ticket.sentiment`` is the canonical classification imported with the
+    ServiceNow record.  The drawer must not downgrade a ticket marked
+    Frustrated or Impatient merely because its *latest* caller update happens
+    not to contain one of the small set of urgency keywords.  Caller wording
+    is therefore supporting evidence and can raise the score, while the
+    canonical classification provides the minimum displayed status/score.
+    """
 
     customer_comments = sorted(
         (entry for entry in ticket.comments if entry.is_customer),
         key=lambda entry: entry.sys_created_on,
     )
+    canonical_scores = {"Frustrated": 85, "Impatient": 50, "Calm": 10}
+    canonical_status = ticket.sentiment or "Calm"
+    baseline_score = canonical_scores.get(canonical_status, 0)
     if not customer_comments:
-        return {"status": "Neutral", "score_pct": 0, "explanation": "No caller-authored additional comments are available for scoring."}
+        status = "Neutral" if canonical_status == "Calm" else canonical_status
+        return {
+            "status": status,
+            "score_pct": baseline_score,
+            "explanation": f"Canonical ServiceNow customer sentiment is {canonical_status}; no caller-authored additional comments are available for supporting evidence.",
+        }
 
     latest = customer_comments[-1]
     latest_text = latest.value.lower()
-    keywords = ("blocked", "immediately", "stuck", "vp", "urgent")
+    keywords = ("blocked", "immediately", "stuck", "vp", "urgent", "emergency", "critical", "outage", "cannot", "unable", "escalat", "eta")
     matched = [keyword for keyword in keywords if keyword in latest_text]
-    score = min(100, len(matched) * 20)
+    comment_score = min(100, len(matched) * 20)
+    score = max(baseline_score, comment_score)
     low_sla = ticket.sla_remaining_percent is not None and ticket.sla_remaining_percent < 20
     if low_sla:
         score = min(100, round(score * 1.5))
 
-    if any(term in latest_text for term in ("thank", "resolved", "appreciate")):
-        status = "Satisfied"
-    elif score >= 70:
+    if canonical_status == "Frustrated" or score >= 70:
         status = "Frustrated"
-    elif score >= 20:
+    elif canonical_status == "Impatient" or score >= 20:
         status = "Impatient"
+    elif any(term in latest_text for term in ("thank", "resolved", "appreciate")):
+        status = "Satisfied"
     else:
         status = "Neutral"
 
+    canonical_clause = f"canonical ServiceNow sentiment: {canonical_status} ({baseline_score}% baseline)"
     trigger = f"urgent caller phrasing ({', '.join(repr(keyword) for keyword in matched)})" if matched else "no urgency keywords in the latest caller update"
     sla_clause = f" and low SLA time remaining ({ticket.sla_remaining_percent}%)" if low_sla else ""
-    return {"status": status, "score_pct": score, "explanation": f"Triggered by {trigger}{sla_clause}."}
+    return {"status": status, "score_pct": score, "explanation": f"Based on {canonical_clause}; supporting evidence: {trigger}{sla_clause}."}
 
 
 def technical_resolution_actions(ticket: Ticket) -> list[dict[str, str]]:
@@ -945,6 +963,7 @@ async def query_chat(query: ChatQuery) -> dict[str, object]:
         "retrieval": rag_result["retrieval"],
         "intent": rag_result["intent"],
         "listed_ticket_ids": rag_result["listed_ticket_ids"],
+        "web_research": rag_result.get("web_research"),
         # Live Stats visualisation data is optional. SOP and ticket requests
         # keep their existing clean text-only response contract.
         "chart_data": rag_result.get("chart_data"),
@@ -1064,7 +1083,7 @@ async def query_chat_stream(query: ChatQuery) -> StreamingResponse:
         # request is alive while local vector retrieval prepares metadata.
         yield ": ATLAS stream connected\n\n"
         try:
-            plan = prepare_hybrid_rag(query.message, query.history)
+            plan = await prepare_hybrid_rag(query.message, query.history)
             metadata = _chat_stream_metadata(query, hybrid_rag_metadata(plan))
             yield _sse_event("metadata", metadata)
             model_used = "ollama:pending"

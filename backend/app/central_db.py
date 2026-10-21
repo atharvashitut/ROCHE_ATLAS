@@ -42,6 +42,18 @@ CENTRAL_KNOWLEDGE_DB: tuple[CentralKnowledgeRecord, ...] = (
         "tags": ["sap", "ewm", "qrfc", "queue", "sm12", "basis", "authorization"],
     },
     {
+        "id": "ATLAS-SAP-EWM-PROC-001",
+        "title": "SAP EWM Standard Outbound Delivery and Goods Issue Process",
+        "source_type": "SAP EWM Process Standard",
+        "system": "SAP S/4HANA EWM",
+        "connector": "SAP Help",
+        "url": "https://help.sap.com/docs/SAP_S4HANA_CLOUD/warehouse-management",
+        "summary": "Standard business flow from ERP sales order and outbound delivery through EWM execution to post goods issue.",
+        "content": "SAP EWM standard goods issue is a business-process flow, not a queue-recovery procedure. Step 1—create the sales order and outbound delivery in ERP or SAP S/4HANA. Step 2—distribute the outbound delivery to EWM, where it becomes an Outbound Delivery Order (ODO) that represents the warehouse request. Step 3—group eligible outbound deliveries into waves by route, shipping time, or operational criteria; release the wave so EWM creates warehouse tasks (WTs) and warehouse orders (WOs). Step 4—warehouse operators pick the assigned stock from source bins using RF or Fiori, then confirm the warehouse tasks. Step 5—pack and consolidate the picked stock at the packing work center, creating or updating handling units (HUs). Step 6—move packed HUs to the goods-issue staging area and load them onto the transportation unit or delivery vehicle. Step 7—post goods issue for the outbound delivery in EWM, typically through /SCWM/PRDO where enabled by the process design. The posting updates the EWM delivery and stock, sends the resulting goods-movement update to the ERP system, and enables the follow-on billing process. If a delivery, warehouse task, RF device, queue, lock, or posting fails, switch to the relevant incident-recovery runbook rather than treating that exception path as the normal goods-issue process.",
+        "ticket_numbers": [],
+        "tags": ["sap", "ewm", "goods issue", "post goods issue", "pgi", "outbound delivery", "outbound delivery order", "odo", "wave", "warehouse task", "warehouse order", "picking", "packing", "handling unit", "staging", "loading", "/scwm/prdo", "erp", "s4hana"],
+    },
+    {
         "id": "VEEVA-SOP-0042",
         "title": "GxP Standard Operating Procedure for Batch Interface Access Controls",
         "source_type": "Veeva Vault SOP",
